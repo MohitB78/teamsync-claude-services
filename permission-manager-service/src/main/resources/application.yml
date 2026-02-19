@@ -1,0 +1,181 @@
+server:
+  port: 9096
+  # SECURITY FIX (Round 8): Prevent stack trace and error message disclosure
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+spring:
+  application:
+    name: permission-manager-service
+
+  # Enable virtual threads for high concurrency (Java 21+)
+  threads:
+    virtual:
+      enabled: true
+
+  # Spring Cloud Config Client
+  config:
+    import: "optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}"
+  cloud:
+    config:
+      enabled: ${CONFIG_ENABLED:true}
+      fail-fast: false
+      retry:
+        initial-interval: 1000
+        max-attempts: 6
+        max-interval: 2000
+        multiplier: 1.1
+    bus:
+      enabled: ${BUS_ENABLED:true}
+      destination: platform.config.bus
+
+  # MongoDB config is in profile-specific files (application-railway.yml)
+  # Permission Manager uses a SEPARATE database for performance isolation
+  data:
+    mongodb:
+      auto-index-creation: true
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          # Increased pool size for high-concurrency permission checks
+          max-active: 128
+          max-idle: 32
+          min-idle: 8
+          max-wait: 2000ms
+
+  # Security - OAuth2 Resource Server (Zitadel)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${ZITADEL_ISSUER:http://localhost:8085}
+          jwk-set-uri: ${ZITADEL_ISSUER:http://localhost:8085}/oauth/v2/keys
+
+  # Kafka Configuration (Redpanda on Railway - Kafka-compatible)
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+    consumer:
+      group-id: permission-manager
+      auto-offset-reset: earliest
+      enable-auto-commit: true
+      properties:
+        spring.json.trusted.packages: com.teamsync.*
+    producer:
+      acks: all
+      retries: 3
+
+  # Spring Cache configuration (Redis-backed)
+  cache:
+    type: redis
+    redis:
+      time-to-live: 300000  # 5 minutes default TTL
+      cache-null-values: false
+      key-prefix: "pm:"
+
+# Permission cache configuration
+permission:
+  cache:
+    # TTL for positive cache entries (user has access)
+    ttl-minutes: 5
+    # TTL for negative cache entries (user has no access)
+    negative-ttl-minutes: 1
+    # SECURITY FIX (Round 5): Reduced admin TTL from 5 minutes to 30 seconds
+    # Admin status changes are security-sensitive - a revoked admin should lose
+    # access within 30 seconds, not 5 minutes. This is a trade-off between
+    # security and cache efficiency, but admin checks are rare compared to
+    # regular permission checks.
+    admin-ttl-seconds: 30
+    # Enable cache warming on login
+    warm-on-login: true
+    # Batch size for Redis SCAN operations (cursor-based iteration)
+    scan-batch-size: 1000
+    # Batch size for Redis DELETE operations
+    delete-batch-size: 100
+
+# OpenTelemetry Configuration (OTel SDK 1.58.0 - January 2026)
+# See: https://opentelemetry.io/docs/languages/java/configuration/
+otel:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      timeout: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
+  traces:
+    sampler:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+  bsp:
+    schedule:
+      delay: ${OTEL_BSP_SCHEDULE_DELAY:5000}
+    max:
+      queue:
+        size: ${OTEL_BSP_MAX_QUEUE_SIZE:2048}
+      export:
+        batch:
+          size: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:512}
+  environment: ${ENVIRONMENT:development}
+
+# Actuator endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+
+# OpenAPI documentation
+# SECURITY FIX (Round 14 #H32): Swagger UI disabled by default, enabled only in dev/local profiles
+# Set SPRINGDOC_ENABLED=true in development environments only
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+    enabled: ${SPRINGDOC_ENABLED:false}
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: ${SPRINGDOC_ENABLED:false}
+
+# Logging
+logging:
+  level:
+    com.teamsync.permission: INFO
+    org.springframework.data.mongodb: WARN
+    org.springframework.data.redis: WARN
+    org.apache.kafka: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
+---
+# Docker profile
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  mongodb:
+    uri: ${SPRING_MONGODB_URI:mongodb://admin:password@accessarc-mongodb:27017/teamsync_permissions?authSource=admin}
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:accessarc-redis}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+
+logging:
+  level:
+    com.teamsync.permission: DEBUG

@@ -1,0 +1,255 @@
+# =============================================================================
+# Railway Profile Configuration for TeamSync API Gateway
+# =============================================================================
+# Most configuration is fetched from Config Server (application-railway.yml).
+# Note: API Gateway doesn't use MongoDB - routing and rate limiting only.
+# Uses Redis for optional rate limiting.
+# =============================================================================
+
+server:
+  port: ${PORT:9080}
+
+spring:
+  application:
+    name: teamsync-api-gateway
+
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+
+  # Security - Zitadel OAuth2
+  # NOTE: issuer-uri removed to prevent auto-configured JwtDecoder from conflicting with BFF's custom decoder.
+  # The BFF's bffJwtDecoder() bean handles JWT validation with proper issuer/audience validation.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Only jwk-set-uri is needed for BFF custom decoder
+          jwk-set-uri: ${ZITADEL_ISSUER:https://zitadel.teamsync.link}/oauth/v2/keys
+
+  cloud:
+    config:
+      enabled: true
+      fail-fast: false
+      # URI must be set alongside import for credentials to be transmitted
+      uri: ${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+      username: ${CONFIG_SERVER_USER:config}
+      password: ${CONFIG_SERVER_PASSWORD:}
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+        max-interval: 5000
+        multiplier: 1.5
+    bus:
+      enabled: false
+    gateway:
+      # Disable service discovery - we use direct HTTP URLs on Railway
+      discovery:
+        locator:
+          enabled: false
+      # HTTP Client connection pooling (Reactor Netty)
+      # PERFORMANCE: Enables HTTP keep-alive to reuse connections to backend services
+      # Railway internal networking benefits greatly from connection reuse
+      httpclient:
+        pool:
+          type: elastic                       # Elastic pool grows as needed
+          max-connections: 500                # Max connections across all routes
+          acquire-timeout: 10000              # 10s timeout to acquire connection
+          max-idle-time: 30s                  # Keep idle connections for 30s
+          max-life-time: 60s                  # Max lifetime of a connection
+          eviction-interval: 60s              # Check for idle connections every 60s
+          metrics: true                       # Enable connection pool metrics
+        connect-timeout: 10000                # 10s connection timeout
+        response-timeout: 65s                 # 65s response timeout (allows for ~50s cold start + processing)
+        compression: true                     # Enable response compression
+
+  # Redis for BFF sessions (required for session cookie management)
+  # Internal Redis (redis.railway.internal) doesn't require TLS
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379}
+      timeout: 10s
+      connect-timeout: 10s
+      lettuce:
+        shutdown-timeout: 200ms
+        pool:
+          # Connection pool tuning - adjust via environment variables without code changes
+          # INCREASED DEFAULTS: Prevents pool exhaustion when Spring Session, rate limiting,
+          # and BFF sessions compete for connections
+          max-active: ${REDIS_POOL_MAX_ACTIVE:100}
+          min-idle: ${REDIS_POOL_MIN_IDLE:20}
+          max-idle: ${REDIS_POOL_MAX_IDLE:50}
+          max-wait: ${REDIS_POOL_MAX_WAIT:2000}
+
+  # Session store configuration
+  session:
+    store-type: redis
+    timeout: 8h
+    redis:
+      namespace: teamsync:bff:session
+
+# Gateway-specific config
+teamsync:
+  # Service URLs for Railway internal networking
+  # These override the lb:// defaults when service discovery is disabled
+  # NOTE: Railway internal networking uses HTTP (not HTTPS) - services don't have SSL certs
+  services:
+    content-service: ${CONTENT_SERVICE_URL:http://teamsync-content-service.railway.internal:9081}
+    storage-service: ${STORAGE_SERVICE_URL:http://teamsync-storage-service.railway.internal:9083}
+    sharing-service: ${SHARING_SERVICE_URL:http://teamsync-sharing-service.railway.internal:9084}
+    team-service: ${TEAM_SERVICE_URL:http://teamsync-team-service.railway.internal:9085}
+    project-service: ${PROJECT_SERVICE_URL:http://teamsync-project-service.railway.internal:9086}
+    workflow-execution-service: ${WORKFLOW_EXECUTION_SERVICE_URL:http://teamsync-workflow-execution-service.railway.internal:9087}
+    trash-service: ${TRASH_SERVICE_URL:http://teamsync-trash-service.railway.internal:9088}
+    search-service: ${SEARCH_SERVICE_URL:http://teamsync-search-service.railway.internal:9089}
+    chat-service: ${CHAT_SERVICE_URL:http://teamsync-chat-service.railway.internal:9090}
+    notification-service: ${NOTIFICATION_SERVICE_URL:http://teamsync-notification-service.railway.internal:9091}
+    activity-service: ${ACTIVITY_SERVICE_URL:http://teamsync-activity-service.railway.internal:9102}
+    wopi-service: ${WOPI_SERVICE_URL:http://teamsync-wopi-service.railway.internal:9093}
+    settings-service: ${SETTINGS_SERVICE_URL:http://teamsync-settings-service.railway.internal:9094}
+    presence-service: ${PRESENCE_SERVICE_URL:http://teamsync-presence-service.railway.internal:9095}
+    permission-manager-service: ${PERMISSION_MANAGER_SERVICE_URL:http://teamsync-permission-manager-service.railway.internal:9096}
+    signing-service: ${SIGNING_SERVICE_URL:http://teamsync-signing-service.railway.internal:9097}
+  gateway:
+    dynamic-routes:
+      enabled: false
+    minio:
+      internal-url: ${MINIO_INTERNAL_URL:http://teamsync-minio.railway.internal:9000}
+      host: ${MINIO_HOST:teamsync-minio.railway.internal:9000}
+    # Gateway public URL for response rewriting
+    public-url: ${API_GATEWAY_URL:https://apigateway.teamsync.link}
+
+  # Zitadel configuration for Railway
+  zitadel:
+    url: ${ZITADEL_URL:https://zitadel.teamsync.link}
+    issuer: ${ZITADEL_ISSUER:https://zitadel.teamsync.link}
+    # Use internal URL for faster service-to-service calls
+    internal-url: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}
+    project-id: ${ZITADEL_PROJECT_ID:}
+    # OIDC proxy header: The public host where API Gateway is deployed (without protocol)
+    # Per Zitadel docs: https://zitadel.com/docs/guides/integrate/login-ui/login-app
+    public-host: ${API_GATEWAY_HOST:apigateway.teamsync.link}
+    # The EXTERNAL host of the Zitadel instance - used for x-zitadel-instance-host header
+    # This must be the public domain configured in Zitadel, NOT the internal Railway hostname
+    external-host: ${ZITADEL_EXTERNAL_HOST:zitadel.teamsync.link}
+
+  frontend:
+    url: https://portal.teamsync.link
+
+  # BFF (Backend for Frontend) Configuration
+  bff:
+    enabled: true
+    session:
+      cookie-name: TEAMSYNC_SESSION
+      cookie-max-age: 8h
+      cookie-secure: true
+      # SameSite=None is required for cross-subdomain cookies (frontend/API Gateway on different subdomains)
+      # Note: Requires cookie-secure: true (already set above)
+      cookie-same-site: None
+      cookie-http-only: true
+      redis-namespace: teamsync:bff:session
+      # Cookie domain for cross-subdomain support - allows cookie to be sent from
+      # portal.teamsync.link to apigateway.teamsync.link
+      cookie-domain: ${COOKIE_DOMAIN:.teamsync.link}
+    csrf:
+      enabled: true
+      cookie-name: XSRF-TOKEN
+      header-name: X-XSRF-TOKEN
+      exclude-patterns:
+        - /api/**
+        - /wopi/**
+        - /bff/auth/**
+        - /bff/admin/**
+        # Zitadel OIDC proxy paths (Session API, auth requests)
+        - /v2/sessions/**
+        - /v2/oidc/**
+        - /oauth/**
+        - /oidc/**
+    # Zitadel OIDC configuration for Railway
+    zitadel:
+      # Internal URL for OIDC proxy routes (GatewayConfig uses this)
+      # All OIDC traffic is proxied through API Gateway - Zitadel has no public ingress
+      internal-url: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}
+      # Internal endpoint URLs for server-to-server communication (Railway internal DNS)
+      internal-authorization-uri: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}/oauth/v2/authorize
+      internal-token-uri: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}/oauth/v2/token
+      internal-user-info-uri: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}/oidc/v1/userinfo
+      internal-logout-uri: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}/oidc/v1/end_session
+      # Public URLs - now via OIDC proxy (browser → API Gateway → Zitadel)
+      # Browser never directly contacts Zitadel - all OIDC traffic goes through API Gateway
+      authorization-uri: ${API_GATEWAY_URL:https://apigateway.teamsync.link}/oauth/v2/authorize
+      token-uri: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}/oauth/v2/token
+      user-info-uri: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}/oidc/v1/userinfo
+      logout-uri: ${API_GATEWAY_URL:https://apigateway.teamsync.link}/oidc/v1/end_session
+      jwks-uri: ${ZITADEL_INTERNAL_URL:https://teamsync-zitadel.railway.internal}/oauth/v2/keys
+      client-id: ${ZITADEL_CLIENT_ID:teamsync-bff}
+      # SECURITY: Expected JWT issuer URL for validation (must match Zitadel's configured issuer)
+      issuer: ${ZITADEL_ISSUER:https://zitadel.teamsync.link}
+      connection-timeout-seconds: 10
+      read-timeout-seconds: 30
+    pkce:
+      enabled: true
+      # IMPORTANT: Use frontend callback URL for cookie handling with custom domains
+      # The callback must go through the frontend proxy to properly set session cookies
+      redirect-uri: ${BFF_REDIRECT_URI:https://portal.teamsync.link/bff/auth/callback}
+      post-logout-redirect-uri: ${BFF_POST_LOGOUT_URI:https://portal.teamsync.link/auth/login}
+      frontend-login-url: ${FRONTEND_URL:https://portal.teamsync.link}
+      frontend-logout-url: ${FRONTEND_LOGOUT_URL:https://portal.teamsync.link/auth/login}
+      scope: openid email profile
+
+# Circuit breaker and timelimiter configuration for Railway
+# IMPORTANT: Increased timeouts to handle cold starts from Railway service sleeping
+# Content Service takes ~50 seconds to cold start, so we need 60s timeout
+resilience4j:
+  timelimiter:
+    configs:
+      default:
+        timeoutDuration: 60s
+        cancelRunningFuture: true
+    instances:
+      contentService:
+        baseConfig: default
+      storageService:
+        baseConfig: default
+      sharingService:
+        baseConfig: default
+      teamService:
+        baseConfig: default
+      projectService:
+        baseConfig: default
+      workflowExecutionService:
+        baseConfig: default
+      trashService:
+        baseConfig: default
+      searchService:
+        baseConfig: default
+      chatService:
+        baseConfig: default
+      notificationService:
+        baseConfig: default
+      activityService:
+        baseConfig: default
+      wopiService:
+        baseConfig: default
+      settingsService:
+        baseConfig: default
+      presenceService:
+        baseConfig: default
+      permissionManagerService:
+        baseConfig: default
+
+management:
+  health:
+    redis:
+      enabled: false
+
+# Production logging configuration
+# PERFORMANCE: Set to INFO for production, use environment variables to enable DEBUG when needed
+logging:
+  level:
+    root: INFO
+    org.springframework.security: ${LOG_LEVEL_SECURITY:WARN}
+    org.springframework.web: ${LOG_LEVEL_WEB:INFO}
+    org.springframework.cloud.gateway: ${LOG_LEVEL_GATEWAY_CORE:INFO}
+    com.teamsync.gateway: ${LOG_LEVEL_GATEWAY:INFO}
+    # Redis/Lettuce logging (useful for connection pool debugging)
+    io.lettuce.core: ${LOG_LEVEL_LETTUCE:WARN}

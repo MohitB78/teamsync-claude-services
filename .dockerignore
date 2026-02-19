@@ -1,0 +1,41 @@
+# TeamSync Backend Docker Ignore
+# Version: 2025-12-11-v4
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.idea
+*.iml
+.vscode
+*.swp
+*.swo
+
+# Build outputs (we build in Docker)
+**/target/
+**/build/
+
+# Logs
+*.log
+logs/
+
+# Temp files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+**/*.md
+
+# Environment files
+.env
+.env.*
+**/.env
+**/.env.*

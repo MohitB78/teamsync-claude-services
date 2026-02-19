@@ -1,0 +1,216 @@
+server:
+  port: 9083
+  # SECURITY FIX (Round 8): Prevent stack trace and error message disclosure
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+  # SECURITY FIX (Round 13 #4): Add request timeout to prevent slow loris attacks
+  tomcat:
+    connection-timeout: 30s
+    keep-alive-timeout: 30s
+    max-connections: 8192
+    accept-count: 100
+
+spring:
+  # Enable virtual threads for high-concurrency I/O operations (Java 25)
+  threads:
+    virtual:
+      enabled: true
+
+  application:
+    name: teamsync-storage-service
+
+  # Spring Cloud Config Client
+  config:
+    import: "optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}"
+  cloud:
+    config:
+      enabled: ${CONFIG_ENABLED:true}
+      fail-fast: false
+      retry:
+        initial-interval: 1000
+        max-attempts: 6
+        max-interval: 2000
+        multiplier: 1.1
+    bus:
+      enabled: ${BUS_ENABLED:true}
+      destination: platform.config.bus
+
+  servlet:
+    multipart:
+      # SECURITY FIX (Round 13 #5): Reduced from 1GB to 100MB to prevent resource exhaustion
+      # Large files should use multipart upload with presigned URLs, not direct upload
+      max-file-size: 100MB
+      max-request-size: 100MB
+      # Enable lazy resolution to avoid memory issues
+      resolve-lazily: true
+
+  # MongoDB config is in profile-specific files (application-railway.yml)
+  data:
+    mongodb:
+      auto-index-creation: true
+
+  # Security - OAuth2 Resource Server (Zitadel)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${ZITADEL_ISSUER:http://localhost:8085}
+          jwk-set-uri: ${ZITADEL_ISSUER:http://localhost:8085}/oauth/v2/keys
+
+  # Kafka Configuration (Redpanda on Railway)
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+# Storage Configuration
+teamsync:
+  security:
+    use-base-config: false  # Use service-specific SecurityConfig
+    # Download token secret for signed URLs (must match content-service)
+    download-token-secret: ${DOWNLOAD_TOKEN_SECRET:default-secret-change-in-production}
+  storage:
+    provider: ${STORAGE_PROVIDER:minio}
+    default-bucket: teamsync-documents
+    multipart-threshold: 104857600  # 100MB - use multipart above this
+    default-chunk-size: 10485760    # 10MB chunks
+    url-expiry-seconds: 3600        # 1 hour presigned URL expiry
+    # Public URL prefix for presigned URLs (goes through API Gateway proxy)
+    # When set, presigned URLs will be rewritten to use this prefix instead of MinIO endpoint
+    # This keeps MinIO internal and routes all storage requests through the API Gateway
+    public-url: ${STORAGE_PUBLIC_URL:}
+
+    # MinIO settings (local development)
+    minio:
+      enabled: true  # Enable MinIO client bean creation
+      endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+      access-key: ${MINIO_ACCESS_KEY:minioadmin}
+      secret-key: ${MINIO_SECRET_KEY:minioadmin}
+      # Connection pool settings for OkHttp
+      connection-pool-size: ${MINIO_POOL_SIZE:50}
+      connection-pool-keep-alive-minutes: ${MINIO_POOL_KEEP_ALIVE:5}
+      connect-timeout-seconds: ${MINIO_CONNECT_TIMEOUT:10}
+      read-timeout-seconds: ${MINIO_READ_TIMEOUT:60}
+
+    # S3 settings (AWS production)
+    s3:
+      region: ${AWS_REGION:us-east-1}
+      access-key: ${AWS_ACCESS_KEY_ID:}
+      secret-key: ${AWS_SECRET_ACCESS_KEY:}
+
+    # GCS settings (GCP production)
+    gcs:
+      project-id: ${GCP_PROJECT_ID:}
+      credentials-path: ${GOOGLE_APPLICATION_CREDENTIALS:}
+
+    # Default quota settings
+    quota:
+      default-limit-gb: 10
+      max-file-size-gb: 1
+      max-file-count: 10000
+
+# OpenTelemetry Configuration
+otel:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+  environment: ${ENVIRONMENT:development}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+  # Distributed tracing configuration
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+    sampling:
+      probability: ${OTEL_SAMPLING_PROBABILITY:1.0}
+
+logging:
+  level:
+    root: INFO
+    com.teamsync: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# Resilience4j Configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      storage:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 30s
+        permittedNumberOfCallsInHalfOpenState: 3
+        slowCallRateThreshold: 80
+        slowCallDurationThreshold: 10s
+        registerHealthIndicator: true
+  retry:
+    instances:
+      storage:
+        maxAttempts: 3
+        waitDuration: 500ms
+        exponentialBackoffMultiplier: 2
+        retryExceptions:
+          - java.io.IOException
+          - java.net.ConnectException
+          - java.net.SocketTimeoutException
+        ignoreExceptions:
+          - com.teamsync.common.exception.ResourceNotFoundException
+          - com.teamsync.common.exception.AccessDeniedException
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI}
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS}
+
+teamsync:
+  storage:
+    # Public URL prefix for presigned URLs - routes through API Gateway proxy
+    # Frontend uploads to /storage-proxy/* which API Gateway proxies to internal MinIO
+    public-url: ${STORAGE_PUBLIC_URL:http://teamsync-api-gateway:9080/storage-proxy}
+    minio:
+      enabled: true
+      endpoint: ${MINIO_ENDPOINT:http://teamsync-minio:9000}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: aws
+
+teamsync:
+  storage:
+    provider: s3
+
+---
+spring:
+  config:
+    activate:
+      on-profile: gcp
+
+teamsync:
+  storage:
+    provider: gcs

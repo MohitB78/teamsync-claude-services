@@ -1,0 +1,242 @@
+# Docker profile - uses container hostnames for service routing
+spring:
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+      routes:
+        # Content Service (Unified folder and document management)
+        - id: content-service-documents
+          uri: http://teamsync-content-service:9081
+          predicates:
+            - Path=/api/documents/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: contentService
+                fallbackUri: forward:/fallback/documents
+        - id: content-service-folders
+          uri: http://teamsync-content-service:9081
+          predicates:
+            - Path=/api/folders/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: contentService
+                fallbackUri: forward:/fallback/folders
+        # Storage Service
+        - id: storage-service
+          uri: http://teamsync-storage-service:9083
+          predicates:
+            - Path=/api/storage/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: storageService
+                fallbackUri: forward:/fallback/storage
+        # Sharing Service
+        - id: sharing-service
+          uri: http://teamsync-sharing-service:9084
+          predicates:
+            - Path=/api/drives/**,/api/shares/**,/api/permissions/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: sharingService
+                fallbackUri: forward:/fallback/sharing
+        # Team Service
+        - id: team-service
+          uri: http://teamsync-team-service:9085
+          predicates:
+            - Path=/api/teams/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: teamService
+                fallbackUri: forward:/fallback/teams
+        # Project Service
+        - id: project-service
+          uri: http://teamsync-project-service:9086
+          predicates:
+            - Path=/api/projects/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: projectService
+                fallbackUri: forward:/fallback/projects
+        # Workflow Execution Service
+        - id: workflow-execution-service
+          uri: http://teamsync-workflow-execution-service:9087
+          predicates:
+            - Path=/api/workflow-executions/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: workflowExecutionService
+                fallbackUri: forward:/fallback/workflows
+        # Trash Service
+        - id: trash-service
+          uri: http://teamsync-trash-service:9088
+          predicates:
+            - Path=/api/trash/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: trashService
+                fallbackUri: forward:/fallback/trash
+        # Search Service
+        - id: search-service
+          uri: http://teamsync-search-service:9089
+          predicates:
+            - Path=/api/search/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: searchService
+                fallbackUri: forward:/fallback/search
+        # Chat/AI Service
+        - id: chat-service
+          uri: http://teamsync-chat-service:9090
+          predicates:
+            - Path=/api/chat/**,/api/ai/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: chatService
+                fallbackUri: forward:/fallback/chat
+        # Notification Service
+        - id: notification-service
+          uri: http://teamsync-notification-service:9091
+          predicates:
+            - Path=/api/notifications/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: notificationService
+                fallbackUri: forward:/fallback/notifications
+        # Activity Service
+        - id: activity-service
+          uri: http://teamsync-activity-service:9092
+          predicates:
+            - Path=/api/activities/**,/api/audit/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: activityService
+                fallbackUri: forward:/fallback/activities
+        # WOPI Service
+        - id: wopi-service
+          uri: http://teamsync-wopi-service:9093
+          predicates:
+            - Path=/wopi/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: wopiService
+                fallbackUri: forward:/fallback/wopi
+        # Settings Service
+        - id: settings-service
+          uri: http://teamsync-settings-service:9094
+          predicates:
+            - Path=/api/settings/**,/api/preferences/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: settingsService
+                fallbackUri: forward:/fallback/settings
+        # Presence Service
+        - id: presence-service
+          uri: http://teamsync-presence-service:9095
+          predicates:
+            - Path=/api/presence/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: presenceService
+                fallbackUri: forward:/fallback/presence
+        # WebSocket for Presence
+        - id: presence-websocket
+          uri: ws://teamsync-presence-service:9095
+          predicates:
+            - Path=/ws/**
+        # MinIO Proxy - Routes presigned URL requests through gateway
+        # Keeps MinIO internal while supporting large file uploads
+        - id: minio-proxy
+          uri: http://teamsync-minio:9000
+          predicates:
+            - Path=/storage-proxy/**
+          filters:
+            - RewritePath=/storage-proxy/(?<segment>.*), /${segment}
+            - SetRequestHeader=Host, teamsync-minio:9000
+
+# MinIO proxy configuration for Docker
+teamsync:
+  gateway:
+    minio:
+      internal-url: http://teamsync-minio:9000
+      host: teamsync-minio:9000
+
+  # Zitadel configuration for Docker
+  zitadel:
+    url: http://teamsync-zitadel:8080
+    issuer: http://teamsync-zitadel:8080
+    project-id: ${ZITADEL_PROJECT_ID:}
+    # OIDC proxy header: The public host where API Gateway is deployed
+    # Per Zitadel docs: https://zitadel.com/docs/guides/integrate/login-ui/login-app
+    public-host: localhost:9080
+    # For local Docker, external-host is the same as public-host (localhost)
+    external-host: localhost:9080
+
+  # BFF (Backend for Frontend) configuration for Docker
+  bff:
+    enabled: true
+    session:
+      cookie-name: TEAMSYNC_SESSION
+      cookie-max-age: 8h
+      cookie-secure: false  # Set to true in production with HTTPS
+      cookie-same-site: Lax
+      cookie-http-only: true
+      redis-namespace: teamsync:bff:session
+    csrf:
+      enabled: true
+      cookie-name: XSRF-TOKEN
+      header-name: X-XSRF-TOKEN
+      exclude-patterns:
+        - /api/**
+        - /wopi/**
+        - /bff/auth/backchannel-logout
+        - /bff/admin/**
+        # Zitadel OIDC proxy paths (Session API, auth requests)
+        - /v2/sessions/**
+        - /oauth/**
+        - /oidc/**
+    # Zitadel OIDC configuration (Docker network)
+    zitadel:
+      # Internal URL for OIDC proxy routes (GatewayConfig uses this)
+      internal-url: http://teamsync-zitadel:8080
+      # Internal endpoint URLs (Docker network only)
+      internal-authorization-uri: http://teamsync-zitadel:8080/oauth/v2/authorize
+      internal-token-uri: http://teamsync-zitadel:8080/oauth/v2/token
+      internal-user-info-uri: http://teamsync-zitadel:8080/oidc/v1/userinfo
+      internal-logout-uri: http://teamsync-zitadel:8080/oidc/v1/end_session
+      # Public URLs (via OIDC proxy - browser never contacts Zitadel directly)
+      # These are now served via API Gateway's OIDC proxy routes
+      authorization-uri: http://localhost:9080/oauth/v2/authorize
+      token-uri: http://teamsync-zitadel:8080/oauth/v2/token
+      user-info-uri: http://teamsync-zitadel:8080/oidc/v1/userinfo
+      logout-uri: http://localhost:9080/oidc/v1/end_session
+      jwks-uri: http://teamsync-zitadel:8080/oauth/v2/keys
+      client-id: ${ZITADEL_CLIENT_ID:teamsync-bff}
+      # SECURITY: Expected JWT issuer URL for validation
+      issuer: http://teamsync-zitadel:8080
+      connection-timeout-seconds: 10
+      read-timeout-seconds: 30
+    # PKCE configuration
+    pkce:
+      enabled: true
+      redirect-uri: http://localhost:9080/bff/auth/callback
+      post-logout-redirect-uri: http://localhost:3001/auth/login
+      frontend-login-url: http://localhost:3001
+      frontend-logout-url: http://localhost:3001/auth/login
+      scope: openid email profile

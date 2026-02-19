@@ -1,0 +1,149 @@
+server:
+  port: 9097
+  # SECURITY: Prevent stack trace and error message disclosure
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+spring:
+  application:
+    name: teamsync-audit-service
+
+  # Spring Cloud Config Client
+  config:
+    import: "optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}"
+  cloud:
+    config:
+      enabled: ${CONFIG_ENABLED:true}
+      fail-fast: false
+      retry:
+        initial-interval: 1000
+        max-attempts: 6
+        max-interval: 2000
+        multiplier: 1.1
+    bus:
+      enabled: ${BUS_ENABLED:true}
+      destination: platform.config.bus
+
+  # MongoDB config for audit log mirror (fast queries)
+  data:
+    mongodb:
+      auto-index-creation: true
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+  # Security - OAuth2 Resource Server (Zitadel)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${ZITADEL_ISSUER:http://localhost:8085}
+          jwk-set-uri: ${ZITADEL_ISSUER:http://localhost:8085}/oauth/v2/keys
+
+  # Kafka Configuration (Redpanda on Railway)
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    consumer:
+      group-id: audit-service
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: com.teamsync.common.event,com.teamsync.audit.dto
+        isolation.level: read_committed
+
+# ImmuDB Configuration
+teamsync:
+  audit:
+    immudb:
+      host: ${IMMUDB_HOST:localhost}
+      port: ${IMMUDB_PORT:3322}
+      database: ${IMMUDB_DATABASE:teamsync_audit}
+      username: ${IMMUDB_USERNAME:immudb}
+      password: ${IMMUDB_PASSWORD:immudb}
+      state-folder: ${IMMUDB_STATE_FOLDER:/var/lib/teamsync/immudb-state}
+      tls:
+        enabled: ${IMMUDB_TLS_ENABLED:false}
+    mongodb-sync:
+      enabled: true
+      collection: audit_logs
+    verification:
+      hash-chain-enabled: true
+    retention:
+      enabled: true
+      default-period: 365d
+      truncation-frequency: 24h
+      min-retention-period: 30d
+      max-retention-period: 2555d
+    # High-value event filtering
+    high-value-events:
+      actions:
+        - DELETE
+        - PERMISSION_CHANGE
+        - SHARE
+      include-failures: true
+      include-denied: true
+    # Deduplication settings
+    deduplication:
+      enabled: true
+      ttl-hours: 24
+      redis-prefix: "teamsync:audit:dedup:"
+
+# OpenTelemetry Configuration
+otel:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      timeout: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
+  traces:
+    sampler:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+  environment: ${ENVIRONMENT:development}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+
+logging:
+  level:
+    root: INFO
+    com.teamsync: DEBUG
+    io.codenotary.immudb4j: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+---
+# Docker profile - uses environment variables from docker-compose
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI}
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:accessarc-redis}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS}

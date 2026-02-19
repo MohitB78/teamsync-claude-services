@@ -1,0 +1,249 @@
+server:
+  port: 9081
+  # SECURITY FIX (Round 8): Prevent stack trace and error message disclosure
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+# Enable virtual threads for high-concurrency I/O operations (Spring Boot 4 / Java 25)
+spring.threads.virtual.enabled: true
+
+spring:
+  application:
+    name: teamsync-content-service
+
+  # Multipart configuration for direct uploads
+  # SECURITY FIX (Round 15 #M7): API Gateway enforces 10MB default, 1GB for upload paths
+  # This service accepts up to 1GB since gateway does the size filtering
+  servlet:
+    multipart:
+      max-file-size: 1GB
+      max-request-size: 1GB
+
+  # SECURITY FIX (Round 15 #M7): In-memory buffer limit for JSON payloads (non-multipart)
+  codec:
+    max-in-memory-size: 10485760  # 10MB
+
+  # Spring Cloud Config Client
+  config:
+    import: "optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}"
+  cloud:
+    config:
+      enabled: ${CONFIG_ENABLED:true}
+      fail-fast: false
+      retry:
+        initial-interval: 1000
+        max-attempts: 6
+        max-interval: 2000
+        multiplier: 1.1
+    bus:
+      enabled: ${BUS_ENABLED:true}
+      destination: platform.config.bus
+    stream:
+      kafka:
+        binder:
+          brokers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+          auto-create-topics: true
+          configuration:
+            auto.offset.reset: earliest
+
+  # MongoDB config is in profile-specific files (application-railway.yml)
+  data:
+    mongodb:
+      auto-index-creation: true
+      # Connection pool settings for high concurrency
+      # These settings apply to the MongoDB driver connection pool
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Lettuce connection pool for Redis caching
+      lettuce:
+        pool:
+          max-active: ${REDIS_POOL_MAX_ACTIVE:50}
+          max-idle: ${REDIS_POOL_MAX_IDLE:25}
+          min-idle: ${REDIS_POOL_MIN_IDLE:5}
+          max-wait: ${REDIS_POOL_MAX_WAIT:5000ms}
+
+  # Security - OAuth2 Resource Server (Zitadel)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${ZITADEL_ISSUER:http://localhost:8085}
+          jwk-set-uri: ${ZITADEL_ISSUER:http://localhost:8085}/oauth/v2/keys
+
+  # Kafka Configuration (Redpanda on Railway)
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    consumer:
+      group-id: content-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: com.teamsync.*
+
+# Storage Configuration
+teamsync:
+  security:
+    use-base-config: false  # Disable base config since this service has its own SecurityConfig
+    # Secret for signing download tokens (REQUIRED - no default for security)
+    # Must be at least 32 characters. Set via DOWNLOAD_TOKEN_SECRET env var.
+    download-token-secret: ${DOWNLOAD_TOKEN_SECRET:}
+  # Service URLs for HTTP clients
+  services:
+    storage-url: ${STORAGE_SERVICE_URL:http://localhost:9083}
+  # Upload configuration
+  upload:
+    # Max file size for direct upload (through backend streaming)
+    # Files larger than this use presigned URLs via API Gateway proxy
+    direct-max-size: ${DIRECT_UPLOAD_MAX_SIZE:10485760}
+  # Cleanup job configuration
+  cleanup:
+    pending-document-age-hours: ${CLEANUP_PENDING_AGE_HOURS:24}
+    pending-documents-cron: ${CLEANUP_PENDING_CRON:0 0 */6 * * *}  # Every 6 hours
+  content:
+    # Public URL of Content Service for generating download URLs
+    # Download URLs point to this service's /api/documents/download endpoint
+    service-url: ${CONTENT_SERVICE_URL:http://localhost:9081}
+  storage:
+    provider: ${STORAGE_PROVIDER:minio}
+    default-bucket: teamsync-documents
+    # MinIO settings (local development)
+    minio:
+      enabled: true  # Enable MinIO client bean creation
+      endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+      access-key: ${MINIO_ACCESS_KEY:minioadmin}
+      secret-key: ${MINIO_SECRET_KEY:minioadmin}
+    # S3 settings (AWS production)
+    s3:
+      region: ${AWS_REGION:us-east-1}
+      access-key: ${AWS_ACCESS_KEY_ID:}
+      secret-key: ${AWS_SECRET_ACCESS_KEY:}
+    # GCS settings (GCP production)
+    gcs:
+      project-id: ${GCP_PROJECT_ID:}
+      credentials-path: ${GOOGLE_APPLICATION_CREDENTIALS:}
+  kafka:
+    topics:
+      content-events: teamsync.content.events
+
+# OpenTelemetry Configuration (OTel SDK 1.58.0 - January 2026)
+# See: https://opentelemetry.io/docs/languages/java/configuration/
+otel:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      timeout: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
+  traces:
+    sampler:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+  bsp:
+    schedule:
+      delay: ${OTEL_BSP_SCHEDULE_DELAY:5000}
+    max:
+      queue:
+        size: ${OTEL_BSP_MAX_QUEUE_SIZE:2048}
+      export:
+        batch:
+          size: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:512}
+  environment: ${ENVIRONMENT:development}
+
+# Actuator endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,refresh,busrefresh
+  endpoint:
+    health:
+      show-details: when_authorized
+    refresh:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+  # Distributed tracing configuration (Micrometer bridge to OTel)
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+
+# Logging
+logging:
+  level:
+    root: INFO
+    com.teamsync: DEBUG
+    org.springframework.data.mongodb: INFO
+    org.springframework.security: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+---
+# Docker profile
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  # MongoDB credentials come from Config Server (via Vault) - only override host here
+  data:
+    mongodb:
+      host: ${spring.data.mongodb.host:accessarc-mongodb}
+    redis:
+      host: ${REDIS_HOST:accessarc-redis}
+      port: 6379
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:teamsync-redpanda:9092}
+
+  cloud:
+    stream:
+      kafka:
+        binder:
+          brokers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:teamsync-redpanda:9092}
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${ZITADEL_ISSUER:http://teamsync-zitadel:8080}
+          jwk-set-uri: ${ZITADEL_ISSUER:http://teamsync-zitadel:8080}/oauth/v2/keys
+
+teamsync:
+  storage:
+    minio:
+      enabled: true
+      endpoint: ${MINIO_ENDPOINT:http://teamsync-minio:9000}
+
+---
+# AWS Production profile
+spring:
+  config:
+    activate:
+      on-profile: aws
+
+teamsync:
+  storage:
+    provider: s3
+
+---
+# GCP Production profile
+spring:
+  config:
+    activate:
+      on-profile: gcp
+
+teamsync:
+  storage:
+    provider: gcs

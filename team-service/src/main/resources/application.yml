@@ -1,0 +1,120 @@
+server:
+  port: 9085
+  # SECURITY FIX (Round 8): Prevent stack trace and error message disclosure
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+spring:
+  application:
+    name: teamsync-team-service
+
+  # Spring Cloud Config Client (optional - falls back to env vars if unavailable)
+  config:
+    import: "optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}"
+  cloud:
+    config:
+      enabled: ${CONFIG_ENABLED:true}
+      fail-fast: false
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+        max-interval: 5000
+        multiplier: 1.5
+    bus:
+      enabled: false
+
+  # MongoDB - Spring Boot 4 uses spring.mongodb.uri (not spring.data.mongodb.uri)
+  # Environment variable: SPRING_MONGODB_URI
+  mongodb:
+    uri: ${SPRING_MONGODB_URI:mongodb://localhost:27017/teamsync}
+
+  data:
+    mongodb:
+      auto-index-creation: true
+
+  # Kafka Configuration (Redpanda on Railway)
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+
+# OpenTelemetry Configuration (OTel SDK 1.58.0 - January 2026)
+# See: https://opentelemetry.io/docs/languages/java/configuration/
+otel:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      timeout: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
+  traces:
+    sampler:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+  bsp:
+    schedule:
+      delay: ${OTEL_BSP_SCHEDULE_DELAY:5000}
+    max:
+      queue:
+        size: ${OTEL_BSP_MAX_QUEUE_SIZE:2048}
+      export:
+        batch:
+          size: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:512}
+  environment: ${ENVIRONMENT:development}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+
+logging:
+  level:
+    root: INFO
+    com.teamsync: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# TeamSync Configuration
+teamsync:
+  # Disable base security config - team-service has its own SecurityConfig
+  security:
+    use-base-config: false
+  # Portal Configuration (for external users)
+  portal:
+    jwt:
+      secret: ${PORTAL_JWT_SECRET:CHANGE_ME_IN_PRODUCTION_32_CHARS_MIN}
+      access-token-expiry: ${PORTAL_ACCESS_TOKEN_EXPIRY:900}  # 15 minutes
+      refresh-token-expiry: ${PORTAL_REFRESH_TOKEN_EXPIRY:604800}  # 7 days
+    magic-link:
+      expiry: ${PORTAL_MAGIC_LINK_EXPIRY:900}  # 15 minutes
+      max-active: ${PORTAL_MAGIC_LINK_MAX_ACTIVE:3}
+  content-service:
+    url: ${CONTENT_SERVICE_URL:http://localhost:9081}
+  storage-service:
+    url: ${STORAGE_SERVICE_URL:http://localhost:9083}
+
+---
+# Docker profile - uses environment variables from docker-compose
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI}
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS}

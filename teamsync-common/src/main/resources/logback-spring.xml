@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TeamSync Common Logback Configuration
+
+  This configuration provides:
+  - Trace ID correlation with OpenTelemetry (traceId and spanId in MDC)
+  - Structured logging with tenant context
+  - JSON output option for log aggregation (Elasticsearch/Loki)
+  - Environment-specific log levels
+
+  MDC Fields (auto-populated by Micrometer Tracing Bridge):
+  - traceId: W3C Trace Context trace ID
+  - spanId: Current span ID
+  - tenantId: Tenant ID from TenantContext (if available)
+  - userId: User ID from SecurityContext (if available)
+  - driveId: Drive ID from request context (if available)
+
+  Usage:
+    log.info("Document created"); // Automatically includes traceId, spanId
+
+  @see https://docs.spring.io/spring-boot/docs/current/reference/html/features.html#features.logging
+-->
+<configuration scan="true" scanPeriod="30 seconds">
+
+    <!-- Include Spring Boot defaults for colors, property conversion, etc. -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- Service name from Spring application.name -->
+    <springProperty scope="context" name="SERVICE_NAME" source="spring.application.name" defaultValue="teamsync-service"/>
+
+    <!-- Environment from otel.environment or ENVIRONMENT -->
+    <springProperty scope="context" name="ENVIRONMENT" source="otel.environment" defaultValue="development"/>
+
+    <!-- ============================================ -->
+    <!-- Console Appender (Development)               -->
+    <!-- ============================================ -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <!-- Pattern with trace correlation
+                 %X{traceId:-} - Trace ID from MDC (empty if not set)
+                 %X{spanId:-} - Span ID from MDC (empty if not set)
+                 %X{tenantId:-} - Tenant ID from TenantContext
+            -->
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [traceId=%X{traceId:-}] [spanId=%X{spanId:-}] [tenant=%X{tenantId:-}] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- ============================================ -->
+    <!-- JSON Appender (Production/Log Aggregation)   -->
+    <!-- ============================================ -->
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- Add custom fields from MDC -->
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>spanId</includeMdcKeyName>
+            <includeMdcKeyName>tenantId</includeMdcKeyName>
+            <includeMdcKeyName>userId</includeMdcKeyName>
+            <includeMdcKeyName>driveId</includeMdcKeyName>
+
+            <!-- Add service context -->
+            <customFields>{"service":"${SERVICE_NAME}","environment":"${ENVIRONMENT}"}</customFields>
+
+            <!-- Timestamp format for Elasticsearch -->
+            <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSS'Z'</timestampPattern>
+            <timeZone>UTC</timeZone>
+        </encoder>
+    </appender>
+
+    <!-- ============================================ -->
+    <!-- Async Appender (for production performance)  -->
+    <!-- ============================================ -->
+    <appender name="ASYNC_JSON" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>512</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <includeCallerData>false</includeCallerData>
+        <appender-ref ref="JSON"/>
+    </appender>
+
+    <!-- ============================================ -->
+    <!-- Log Levels by Profile                        -->
+    <!-- ============================================ -->
+
+    <!-- Development profile: Console output, DEBUG level -->
+    <springProfile name="default,local,dev,docker">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+
+        <!-- TeamSync packages at DEBUG -->
+        <logger name="com.teamsync" level="DEBUG"/>
+
+        <!-- Spring framework at INFO -->
+        <logger name="org.springframework" level="INFO"/>
+        <logger name="org.springframework.security" level="DEBUG"/>
+
+        <!-- Database drivers at WARN -->
+        <logger name="org.mongodb" level="WARN"/>
+        <logger name="org.springframework.data.mongodb" level="WARN"/>
+        <logger name="io.lettuce" level="WARN"/>
+
+        <!-- Kafka at WARN -->
+        <logger name="org.apache.kafka" level="WARN"/>
+
+        <!-- OpenTelemetry SDK at INFO (reduce noise) -->
+        <logger name="io.opentelemetry" level="INFO"/>
+    </springProfile>
+
+    <!-- Railway/Production profile: JSON output, INFO level -->
+    <springProfile name="railway,production,staging">
+        <root level="INFO">
+            <appender-ref ref="ASYNC_JSON"/>
+        </root>
+
+        <!-- TeamSync packages at INFO -->
+        <logger name="com.teamsync" level="INFO"/>
+
+        <!-- Reduce noise from frameworks -->
+        <logger name="org.springframework" level="WARN"/>
+        <logger name="org.mongodb" level="WARN"/>
+        <logger name="io.lettuce" level="WARN"/>
+        <logger name="org.apache.kafka" level="WARN"/>
+        <logger name="io.opentelemetry" level="WARN"/>
+
+        <!-- Security events at INFO (for audit) -->
+        <logger name="org.springframework.security" level="INFO"/>
+    </springProfile>
+
+</configuration>

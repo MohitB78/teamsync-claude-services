@@ -1,0 +1,376 @@
+server:
+  port: 9080
+  # SECURITY FIX (Round 15 #M7): Limit HTTP request header size
+  max-http-request-header-size: 16KB
+  # SECURITY FIX (Round 8): Prevent stack trace and error message disclosure
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+spring:
+  application:
+    name: teamsync-api-gateway
+
+  # SECURITY FIX (Round 15 #M7): Payload size limits to prevent memory exhaustion
+  # Default 10MB limit for JSON payloads - upload endpoints have separate larger limits
+  codec:
+    max-in-memory-size: 10485760  # 10MB
+
+  webflux:
+    multipart:
+      max-file-size: 10485760   # 10MB default
+      max-request-size: 10485760  # 10MB default
+
+  # Spring Cloud Config Client
+  config:
+    import: "optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}"
+
+  # Kafka for Spring Cloud Bus (Redpanda on Railway)
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+
+  # Security - Zitadel OAuth2
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # NOTE: issuer-uri removed to prevent auto-configured JwtDecoder from conflicting with BFF's custom decoder
+          jwk-set-uri: ${ZITADEL_ISSUER:http://localhost:8085}/oauth/v2/keys
+
+  # Redis for rate limiting and BFF session store
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      lettuce:
+        pool:
+          # Connection pool tuning - adjust via environment variables without code changes
+          # INCREASED DEFAULTS: Prevents pool exhaustion when Spring Session, rate limiting,
+          # and BFF sessions compete for connections
+          max-active: ${REDIS_POOL_MAX_ACTIVE:100}
+          min-idle: ${REDIS_POOL_MIN_IDLE:20}
+          max-idle: ${REDIS_POOL_MAX_IDLE:50}
+          max-wait: ${REDIS_POOL_MAX_WAIT:2000}
+
+  # Spring Session configuration (for BFF)
+  session:
+    store-type: redis
+    timeout: 8h
+    redis:
+      namespace: teamsync:bff:session
+
+  # Spring Cloud configuration
+  cloud:
+    # Config Client settings
+    config:
+      enabled: ${CONFIG_ENABLED:true}
+      fail-fast: false
+      retry:
+        initial-interval: 1000
+        max-attempts: 6
+        max-interval: 2000
+        multiplier: 1.1
+    # Cloud Bus for config refresh
+    bus:
+      enabled: ${BUS_ENABLED:true}
+      destination: platform.config.bus
+    # Gateway configuration
+    gateway:
+      # HTTP Client connection pooling (Reactor Netty)
+      # PERFORMANCE: Enables HTTP keep-alive to reuse connections to backend services
+      # This saves ~200ms per request by avoiding TCP/TLS handshake overhead
+      httpclient:
+        # Connection pool settings
+        pool:
+          type: elastic                       # Elastic pool grows as needed
+          max-connections: 500                # Max connections across all routes
+          acquire-timeout: 10000              # 10s timeout to acquire connection
+          max-idle-time: 30s                  # Keep idle connections for 30s
+          max-life-time: 60s                  # Max lifetime of a connection
+          eviction-interval: 60s              # Check for idle connections every 60s
+          metrics: true                       # Enable connection pool metrics
+        # Timeouts
+        connect-timeout: 10000                # 10s connection timeout
+        response-timeout: 30s                 # 30s response timeout
+        # Compression (reduces payload size over network)
+        compression: true
+        # WebSocket settings
+        websocket:
+          max-frame-payload-length: 65536     # 64KB max WebSocket frame
+      # Default filters applied to all routes
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+        - AddRequestHeader=X-Gateway-Timestamp, ${#temporals.format(#dates.createNow(), 'yyyy-MM-dd HH:mm:ss')}
+      # Global CORS (also configured in SecurityConfig)
+      # SECURITY FIX (Round 14 #C9): Restricted CORS to specific known domains only.
+      # Wildcard patterns like *.up.railway.app allowed any Railway subdomain including
+      # potentially compromised services, creating cross-origin attack vectors.
+      globalcors:
+        corsConfigurations:
+          '[/**]':
+            allowedOriginPatterns:
+              - "http://localhost:*"
+              - "https://teamsync.com"
+              - "https://app.teamsync.com"
+              - "https://accessarc.com"
+              - "https://app.accessarc.com"
+              # Custom domains for TeamSync
+              - "https://portal.teamsync.link"
+              - "https://apigateway.teamsync.link"
+              - "https://tseditor.teamsync.link"
+              # Specific Railway deployments only - not wildcard (legacy/fallback)
+              - "https://teamsync-frontend-production.up.railway.app"
+              - "https://teamsync-api-gateway-production.up.railway.app"
+              - "https://accessarc-frontend-production.up.railway.app"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - PATCH
+              - DELETE
+              - OPTIONS
+            allowedHeaders:
+              - "*"
+            exposedHeaders:
+              - X-Request-ID
+              - X-Trace-ID
+              - Content-Disposition
+              - Set-Cookie
+              - X-XSRF-TOKEN
+              - traceparent
+              - tracestate
+            allowCredentials: true
+            maxAge: 3600
+
+# Circuit breaker configuration
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 30s
+        failureRateThreshold: 50
+        eventConsumerBufferSize: 10
+    instances:
+      contentService:
+        baseConfig: default
+      storageService:
+        baseConfig: default
+      sharingService:
+        baseConfig: default
+      teamService:
+        baseConfig: default
+      projectService:
+        baseConfig: default
+      workflowExecutionService:
+        baseConfig: default
+      trashService:
+        baseConfig: default
+      searchService:
+        baseConfig: default
+      chatService:
+        baseConfig: default
+      notificationService:
+        baseConfig: default
+      activityService:
+        baseConfig: default
+      wopiService:
+        baseConfig: default
+      settingsService:
+        baseConfig: default
+      presenceService:
+        baseConfig: default
+      permissionManagerService:
+        baseConfig: default
+
+  timelimiter:
+    configs:
+      default:
+        timeoutDuration: 30s
+
+# OpenTelemetry Configuration (OTel SDK 1.58.0 - January 2026)
+# See: https://opentelemetry.io/docs/languages/java/configuration/
+otel:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      timeout: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
+  traces:
+    sampler:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+  bsp:
+    schedule:
+      delay: ${OTEL_BSP_SCHEDULE_DELAY:5000}
+    max:
+      queue:
+        size: ${OTEL_BSP_MAX_QUEUE_SIZE:2048}
+      export:
+        batch:
+          size: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:512}
+  environment: ${ENVIRONMENT:development}
+
+# Actuator endpoints
+# SECURITY FIX (Round 8): Removed refresh and busrefresh endpoints
+# These endpoints allow attackers to trigger configuration refresh which could:
+# 1. Cause denial of service by exhausting resources
+# 2. Load malicious configuration if config server is compromised
+# See: CVE-2025-48927 (Spring Boot Actuator HeapDump exposure)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,gateway
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true
+    gateway:
+      enabled: true
+    # SECURITY: Explicitly disable dangerous endpoints
+    refresh:
+      enabled: false
+    shutdown:
+      enabled: false
+    env:
+      enabled: false
+    heapdump:
+      enabled: false
+    threaddump:
+      enabled: false
+    configprops:
+      enabled: false
+    beans:
+      enabled: false
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+  # Distributed tracing configuration (Micrometer bridge to OTel)
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+
+# Logging
+# SECURITY FIX (Round 14 #H50): Changed default log level from DEBUG to INFO.
+# DEBUG logging can expose sensitive information such as:
+# - Request/response bodies with user data
+# - Internal state and variable values
+# - Authentication token details
+# Use DEBUG only in development profile.
+logging:
+  level:
+    root: INFO
+    com.teamsync: INFO
+    org.springframework.cloud.gateway: INFO
+    org.springframework.security: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# Default TeamSync Gateway configuration
+teamsync:
+  gateway:
+    dynamic-routes:
+      enabled: false
+    # MinIO proxy configuration - keeps MinIO internal while supporting presigned URLs
+    minio:
+      internal-url: ${MINIO_INTERNAL_URL:http://localhost:9000}
+      host: ${MINIO_HOST:localhost:9000}
+
+  # Zitadel configuration for JWT validation and role extraction
+  zitadel:
+    url: ${ZITADEL_URL:http://localhost:8085}
+    issuer: ${ZITADEL_ISSUER:http://localhost:8085}
+    project-id: ${ZITADEL_PROJECT_ID:}
+
+  # BFF (Backend for Frontend) configuration
+  bff:
+    enabled: ${BFF_ENABLED:true}
+    session:
+      cookie-name: TEAMSYNC_SESSION
+      cookie-max-age: 8h
+      cookie-secure: ${BFF_COOKIE_SECURE:false}
+      cookie-same-site: ${BFF_COOKIE_SAMESITE:Lax}
+      cookie-http-only: true
+      redis-namespace: teamsync:bff:session
+    csrf:
+      enabled: true
+      cookie-name: XSRF-TOKEN
+      header-name: X-XSRF-TOKEN
+      exclude-patterns:
+        - /api/**
+        - /wopi/**
+        - /bff/auth/backchannel-logout
+        - /bff/admin/**
+    # Zitadel OIDC configuration
+    zitadel:
+      # Internal Zitadel URLs (for server-to-server communication)
+      internal-authorization-uri: ${ZITADEL_INTERNAL_URL:http://localhost:8085}/oauth/v2/authorize
+      internal-token-uri: ${ZITADEL_INTERNAL_URL:http://localhost:8085}/oauth/v2/token
+      internal-user-info-uri: ${ZITADEL_INTERNAL_URL:http://localhost:8085}/oidc/v1/userinfo
+      internal-logout-uri: ${ZITADEL_INTERNAL_URL:http://localhost:8085}/oidc/v1/end_session
+      # Public Zitadel URLs (for browser redirects)
+      authorization-uri: ${ZITADEL_URL:http://localhost:8085}/oauth/v2/authorize
+      token-uri: ${ZITADEL_URL:http://localhost:8085}/oauth/v2/token
+      user-info-uri: ${ZITADEL_URL:http://localhost:8085}/oidc/v1/userinfo
+      logout-uri: ${ZITADEL_URL:http://localhost:8085}/oidc/v1/end_session
+      jwks-uri: ${ZITADEL_URL:http://localhost:8085}/oauth/v2/keys
+      client-id: ${ZITADEL_CLIENT_ID:teamsync-bff}
+      # SECURITY: Expected JWT issuer URL for validation
+      issuer: ${ZITADEL_ISSUER:http://localhost:8085}
+      connection-timeout-seconds: 10
+      read-timeout-seconds: 30
+    # PKCE (Proof Key for Code Exchange) configuration
+    pkce:
+      enabled: true
+      redirect-uri: ${BFF_REDIRECT_URI:http://localhost:9080/bff/auth/callback}
+      post-logout-redirect-uri: ${BFF_POST_LOGOUT_URI:http://localhost:3001/auth/login}
+      frontend-login-url: ${FRONTEND_URL:http://localhost:3001}
+      frontend-logout-url: ${FRONTEND_LOGOUT_URL:http://localhost:3001/auth/login}
+      scope: openid email profile
+
+---
+# Local development profile
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+
+# Static service URLs for local development
+teamsync:
+  gateway:
+    dynamic-routes:
+      enabled: false
+    minio:
+      internal-url: http://localhost:9000
+      host: localhost:9000
+  services:
+    content-service: http://localhost:9081
+    storage-service: http://localhost:9083
+    sharing-service: http://localhost:9084
+    team-service: http://localhost:9085
+    project-service: http://localhost:9086
+    workflow-execution-service: http://localhost:9087
+    trash-service: http://localhost:9088
+    search-service: http://localhost:9089
+    chat-service: http://localhost:9090
+    notification-service: http://localhost:9091
+    activity-service: http://localhost:9092
+    wopi-service: http://localhost:9093
+    settings-service: http://localhost:9094
+    presence-service: http://localhost:9095
+    permission-manager-service: http://localhost:9096

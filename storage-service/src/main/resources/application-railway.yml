@@ -1,0 +1,54 @@
+# =============================================================================
+# Railway Profile Configuration for TeamSync Storage Service
+# =============================================================================
+# Most configuration is fetched from Config Server (application-railway.yml).
+# MongoDB credentials are managed by Vault (dynamic secrets with 1-hour TTL).
+# Service-specific config: teamsync/teamsync-storage-service.yml in config-repo
+# Shared MongoDB config: teamsync/application.yml (Vault role: teamsync-shared)
+# =============================================================================
+
+server:
+  port: ${PORT:9083}
+
+spring:
+  application:
+    name: teamsync-storage-service
+
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+
+  cloud:
+    config:
+      enabled: true
+      fail-fast: false
+      # URI must be set alongside import for credentials to be transmitted
+      uri: ${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+      username: ${CONFIG_SERVER_USER:config}
+      password: ${CONFIG_SERVER_PASSWORD:}
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+        max-interval: 5000
+        multiplier: 1.5
+    bus:
+      enabled: false
+
+  # Service-specific settings
+  servlet:
+    multipart:
+      max-file-size: 1GB
+      max-request-size: 1GB
+
+  # MongoDB credentials are provided by Config Server (from Vault)
+  # No hardcoded credentials - Config Server injects dynamic credentials
+
+# Service-specific settings (override config server defaults if needed)
+teamsync:
+  security:
+    # Secret for signing download tokens - should match content-service
+    download-token-secret: ${DOWNLOAD_TOKEN_SECRET:default-secret-change-in-production}
+  storage:
+    public-url: ${STORAGE_PUBLIC_URL:https://teamsync-api-gateway.railway.app/storage-proxy}
+  kafka:
+    topics:
+      storage-events: teamsync.storage.events

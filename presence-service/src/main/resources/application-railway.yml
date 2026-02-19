@@ -1,0 +1,39 @@
+# =============================================================================
+# Railway Profile Configuration for TeamSync Presence Service
+# =============================================================================
+# Most configuration is fetched from Config Server (application-railway.yml).
+# Note: This service uses Redis as primary store - no MongoDB needed.
+# Service-specific config: teamsync/teamsync-presence-service.yml in config-repo
+# =============================================================================
+
+server:
+  port: ${PORT:9095}
+
+spring:
+  application:
+    name: teamsync-presence-service
+
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+
+  cloud:
+    config:
+      enabled: true
+      fail-fast: false
+      # URI must be set alongside import for credentials to be transmitted
+      uri: ${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+      username: ${CONFIG_SERVER_USER:config}
+      password: ${CONFIG_SERVER_PASSWORD:}
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+        max-interval: 5000
+        multiplier: 1.5
+    bus:
+      enabled: false
+
+  # Redis as primary store for presence (low latency) - no MongoDB needed
+  data:
+    redis:
+      url: ${REDIS_URL:redis://redis.railway.internal:6379}
+      timeout: 2000ms

@@ -1,0 +1,48 @@
+# =============================================================================
+# TeamSync Backend - Git Ignore
+# =============================================================================
+# Prevent accidental commit of sensitive files
+# =============================================================================
+
+# Environment files with secrets
+.env
+.env.*
+!.env.template
+*.env
+
+# Vault credentials
+vault.keys
+vault.token
+*.keys
+*.token
+
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Test output
+test-output/
+surefire-reports/
+
+# Build artifacts
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+*.war
+*.ear
+
+# OS files
+.DS_Store
+Thumbs.db

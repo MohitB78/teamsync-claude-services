@@ -1,0 +1,20 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "search-service/Dockerfile",
+    "watchPatterns": [
+      "search-service/**",
+      "teamsync-common/**",
+      "pom.xml"
+    ]
+  },
+  "deploy": {
+    "numReplicas": 1,
+    "healthcheckPath": "/actuator/health/liveness",
+    "healthcheckTimeout": 600,
+    "startCommand": null,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 5
+  }
+}

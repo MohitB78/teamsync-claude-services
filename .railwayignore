@@ -1,0 +1,60 @@
+# Ignore Maven build output (Railway will build from source)
+target/
+
+# Ignore IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+
+# Ignore environment files
+.env
+.env.*
+!.env.template
+*.env
+
+# Ignore vault credentials
+vault.keys
+vault.token
+*.keys
+*.token
+
+# Ignore logs
+*.log
+logs/
+
+# Ignore test output
+test-output/
+
+# Ignore Docker files (Railway uses Dockerfile)
+docker-compose*.yml
+docker/
+
+# Ignore scripts not needed for build
+scripts/
+*.sh
+!mvnw
+
+# Ignore documentation
+*.md
+docs/
+
+# Ignore other services (each deploys separately)
+# content-service/
+# storage-service/
+# sharing-service/
+# team-service/
+# project-service/
+# workflow-execution/
+# trash-service/
+# search-service/
+# chat-service/
+# notification-service/
+# activity-service/
+# wopi-host-service/
+# settings-service/
+# presence-service/
+# permission-manager/

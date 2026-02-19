@@ -1,0 +1,47 @@
+# =============================================================================
+# Railway Profile Configuration for TeamSync Signing Service
+# =============================================================================
+# MongoDB credentials come from SPRING_MONGODB_URI environment variable
+# Config Server provides additional shared configuration
+# =============================================================================
+
+server:
+  port: ${PORT:9097}
+
+spring:
+  application:
+    name: teamsync-signing-service
+
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+
+  cloud:
+    config:
+      enabled: true
+      fail-fast: false
+      # URI must be set alongside import for credentials to be transmitted
+      uri: ${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+      username: ${CONFIG_SERVER_USER:config}
+      password: ${CONFIG_SERVER_PASSWORD:}
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+        max-interval: 5000
+        multiplier: 1.5
+    bus:
+      enabled: false
+
+  # MongoDB - Spring Boot 4 uses spring.mongodb.uri (not spring.data.mongodb.uri)
+  # Environment variable: SPRING_MONGODB_URI
+  mongodb:
+    uri: ${SPRING_MONGODB_URI:mongodb://localhost:27017/teamsync}
+
+  # Kafka producer configuration (signing service only produces, doesn't consume)
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+
+# Service-specific settings
+teamsync:
+  # Disable base security config - this service has its own SecurityConfig
+  security:
+    use-base-config: false

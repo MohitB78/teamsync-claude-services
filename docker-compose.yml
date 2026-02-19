@@ -1,0 +1,659 @@
+# ==============================================
+# TeamSync Backend Docker Compose
+# ==============================================
+# This file orchestrates all TeamSync backend services
+# NOTE: Uses shared infrastructure (MongoDB, Redis, Zitadel)
+# Build: docker-compose build
+# Start: docker-compose up -d
+# Stop: docker-compose down
+# Logs: docker-compose logs -f <service-name>
+# ==============================================
+
+services:
+  # ============================================
+  # Infrastructure Services (TeamSync-specific only)
+  # MongoDB, Redis are shared from AccessArc
+  # Zitadel runs separately in docker-compose.zitadel.yml
+  # ============================================
+
+  minio:
+    image: minio/minio:latest
+    container_name: teamsync-minio
+    restart: unless-stopped
+    # NOTE: Port 9000 (S3 API) is NOT exposed externally
+    # All storage requests go through API Gateway's /storage-proxy/* route
+    # Only console port 9001 is exposed for admin access
+    expose:
+      - "9000"  # Internal only - accessible by other containers
+    ports:
+      - "9001:9001"  # Admin console only
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - teamsync-minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - teamsync-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redpanda - Kafka-compatible streaming platform (lighter, faster, no ZooKeeper/KRaft)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    container_name: teamsync-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://teamsync-redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://teamsync-redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr teamsync-redpanda:33145
+      - --advertise-rpc-addr teamsync-redpanda:33145
+      - --mode dev-container
+      - --smp 1
+      - --memory 1G
+      - --default-log-level=info
+    ports:
+      - "19092:19092"  # Kafka API (external)
+      - "18081:18081"  # Schema Registry (external)
+      - "18082:18082"  # Pandaproxy/REST API (external)
+      - "9644:9644"    # Admin API
+    volumes:
+      - teamsync-redpanda-data:/var/lib/redpanda/data
+    networks:
+      - teamsync-network
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: teamsync-elasticsearch
+    restart: unless-stopped
+    ports:
+      - "9201:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.ml.enabled=false
+      - xpack.monitoring.collection.enabled=false
+      - xpack.watcher.enabled=false
+      - ingest.geoip.downloader.enabled=false
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    volumes:
+      - teamsync-elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - teamsync-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  # ImmuDB - Immutable Database for Tamper-Proof Audit Logs
+  # Version: 1.10.0 (Latest stable as of Oct 2024)
+  # Port: 3322 (gRPC API)
+  # Documentation: https://docs.immudb.io
+  immudb:
+    image: codenotary/immudb:1.10.0
+    container_name: teamsync-immudb
+    restart: unless-stopped
+    ports:
+      - "3322:3322"   # gRPC API
+      - "9497:9497"   # Metrics (Prometheus)
+      - "8088:8080"   # Web console (different port to avoid conflict)
+    environment:
+      IMMUDB_ADMIN_PASSWORD: ${IMMUDB_ADMIN_PASSWORD:-immudb}
+      IMMUDB_DIR: /var/lib/immudb
+    volumes:
+      - teamsync-immudb-data:/var/lib/immudb
+    networks:
+      - teamsync-network
+    healthcheck:
+      test: ["CMD", "immuadmin", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ============================================
+  # TeamSync Microservices
+  # ============================================
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    image: teamsync/api-gateway:latest
+    container_name: teamsync-api-gateway
+    restart: unless-stopped
+    ports:
+      - "9080:9080"
+    environment:
+      SERVER_PORT: 9080
+      SPRING_PROFILES_ACTIVE: docker
+      # OAuth2 Resource Server - Zitadel (internal Docker network)
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+      ZITADEL_URL: http://teamsync-zitadel:8080
+      ZITADEL_PROJECT_ID: ${ZITADEL_PROJECT_ID:-}
+      # Redis for session storage
+      SPRING_DATA_REDIS_HOST: accessarc-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      # BFF Configuration - Zitadel is INTERNAL ONLY (not exposed to browser)
+      BFF_ENABLED: "true"
+      ZITADEL_CLIENT_ID: teamsync-bff
+      # PKCE Configuration - Authorization Code Flow
+      BFF_REDIRECT_URI: http://localhost:9080/bff/auth/callback
+      BFF_POST_LOGOUT_URI: http://localhost:3001/auth/login
+      FRONTEND_URL: http://localhost:3001
+      FRONTEND_LOGOUT_URL: http://localhost:3001/auth/login
+      # Session Cookie Configuration
+      BFF_COOKIE_SECURE: "false"
+      # MinIO proxy configuration - routes /storage-proxy/* to MinIO
+      MINIO_INTERNAL_URL: http://teamsync-minio:9000
+      MINIO_HOST: teamsync-minio:9000
+      GATEWAY_PUBLIC_URL: http://localhost:9080
+      # Service URIs for Docker networking (uses container hostnames)
+      TEAMSYNC_SERVICES_CONTENT_SERVICE: http://teamsync-content-service:9081
+      TEAMSYNC_SERVICES_STORAGE_SERVICE: http://teamsync-storage-service:9083
+      TEAMSYNC_SERVICES_SHARING_SERVICE: http://teamsync-sharing-service:9084
+      TEAMSYNC_SERVICES_TEAM_SERVICE: http://teamsync-team-service:9085
+      TEAMSYNC_SERVICES_PROJECT_SERVICE: http://teamsync-project-service:9086
+      TEAMSYNC_SERVICES_WORKFLOW_EXECUTION_SERVICE: http://teamsync-workflow-execution-service:9087
+      TEAMSYNC_SERVICES_TRASH_SERVICE: http://teamsync-trash-service:9088
+      TEAMSYNC_SERVICES_SEARCH_SERVICE: http://teamsync-search-service:9089
+      TEAMSYNC_SERVICES_CHAT_SERVICE: http://teamsync-chat-service:9090
+      TEAMSYNC_SERVICES_NOTIFICATION_SERVICE: http://teamsync-notification-service:9091
+      TEAMSYNC_SERVICES_ACTIVITY_SERVICE: http://teamsync-activity-service:9092
+      TEAMSYNC_SERVICES_WOPI_SERVICE: http://teamsync-wopi-service:9093
+      TEAMSYNC_SERVICES_SETTINGS_SERVICE: http://teamsync-settings-service:9094
+      TEAMSYNC_SERVICES_PRESENCE_SERVICE: http://teamsync-presence-service:9095
+      TEAMSYNC_SERVICES_PERMISSION_MANAGER_SERVICE: http://teamsync-permission-manager-service:9096
+    depends_on:
+      minio:
+        condition: service_healthy
+    # Note: teamsync-zitadel and accessarc-redis are external services
+    networks:
+      - teamsync-network
+
+  content-service:
+    build:
+      context: .
+      dockerfile: content-service/Dockerfile
+    image: teamsync/content-service:latest
+    container_name: teamsync-content-service
+    restart: unless-stopped
+    ports:
+      - "9081:9081"
+    environment:
+      SERVER_PORT: 9081
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+      MINIO_ENDPOINT: http://teamsync-minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      # Permission Manager Service for RBAC
+      TEAMSYNC_PERMISSION_MANAGER_URL: http://teamsync-permission-manager-service:9096
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      permission-manager-service:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  storage-service:
+    build:
+      context: .
+      dockerfile: storage-service/Dockerfile
+    image: teamsync/storage-service:latest
+    container_name: teamsync-storage-service
+    restart: unless-stopped
+    ports:
+      - "9083:9083"
+    environment:
+      SERVER_PORT: 9083
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+      MINIO_ENDPOINT: http://teamsync-minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      STORAGE_PROVIDER: minio
+      # Public URL prefix for presigned URLs - routes through API Gateway proxy
+      # Presigned URLs will be rewritten from http://teamsync-minio:9000/... to http://teamsync-api-gateway:9080/storage-proxy/...
+      STORAGE_PUBLIC_URL: http://teamsync-api-gateway:9080/storage-proxy
+      # Permission Manager Service for RBAC
+      TEAMSYNC_PERMISSION_MANAGER_URL: http://teamsync-permission-manager-service:9096
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      permission-manager-service:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  sharing-service:
+    build:
+      context: .
+      dockerfile: sharing-service/Dockerfile
+    image: teamsync/sharing-service:latest
+    container_name: teamsync-sharing-service
+    restart: unless-stopped
+    ports:
+      - "9084:9084"
+    environment:
+      SERVER_PORT: 9084
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_DATA_REDIS_HOST: accessarc-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+      # Permission Manager Service for RBAC
+      TEAMSYNC_PERMISSION_MANAGER_URL: http://teamsync-permission-manager-service:9096
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      permission-manager-service:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  team-service:
+    build:
+      context: .
+      dockerfile: team-service/Dockerfile
+    image: teamsync/team-service:latest
+    container_name: teamsync-team-service
+    restart: unless-stopped
+    ports:
+      - "9085:9085"
+    environment:
+      SERVER_PORT: 9085
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  project-service:
+    build:
+      context: .
+      dockerfile: project-service/Dockerfile
+    image: teamsync/project-service:latest
+    container_name: teamsync-project-service
+    restart: unless-stopped
+    ports:
+      - "9086:9086"
+    environment:
+      SERVER_PORT: 9086
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  workflow-execution-service:
+    build:
+      context: .
+      dockerfile: workflow-execution-service/Dockerfile
+    image: teamsync/workflow-execution-service:latest
+    container_name: teamsync-workflow-execution-service
+    restart: unless-stopped
+    ports:
+      - "9087:9087"
+    environment:
+      SERVER_PORT: 9087
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  trash-service:
+    build:
+      context: .
+      dockerfile: trash-service/Dockerfile
+    image: teamsync/trash-service:latest
+    container_name: teamsync-trash-service
+    restart: unless-stopped
+    ports:
+      - "9088:9088"
+    environment:
+      SERVER_PORT: 9088
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+      # Permission Manager Service for RBAC
+      TEAMSYNC_PERMISSION_MANAGER_URL: http://teamsync-permission-manager-service:9096
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      permission-manager-service:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  search-service:
+    build:
+      context: .
+      dockerfile: search-service/Dockerfile
+    image: teamsync/search-service:latest
+    container_name: teamsync-search-service
+    restart: unless-stopped
+    ports:
+      - "9089:9089"
+    environment:
+      SERVER_PORT: 9089
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_ELASTICSEARCH_URIS: http://teamsync-elasticsearch:9200
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  chat-service:
+    build:
+      context: .
+      dockerfile: chat-service/Dockerfile
+    image: teamsync/chat-service:latest
+    container_name: teamsync-chat-service
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    environment:
+      SERVER_PORT: 9090
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: notification-service/Dockerfile
+    image: teamsync/notification-service:latest
+    container_name: teamsync-notification-service
+    restart: unless-stopped
+    ports:
+      - "9091:9091"
+    environment:
+      SERVER_PORT: 9091
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  activity-service:
+    build:
+      context: .
+      dockerfile: activity-service/Dockerfile
+    image: teamsync/activity-service:latest
+    container_name: teamsync-activity-service
+    restart: unless-stopped
+    ports:
+      - "9102:9102"
+    environment:
+      SERVER_PORT: 9102
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  wopi-service:
+    build:
+      context: .
+      dockerfile: wopi-service/Dockerfile
+    image: teamsync/wopi-service:latest
+    container_name: teamsync-wopi-service
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    environment:
+      SERVER_PORT: 9093
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      SPRING_DATA_REDIS_HOST: accessarc-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      MINIO_ENDPOINT: http://teamsync-minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # Note: accessarc-mongodb and teamsync-redis are external services from AccessArc
+    networks:
+      - teamsync-network
+
+  settings-service:
+    build:
+      context: .
+      dockerfile: settings-service/Dockerfile
+    image: teamsync/settings-service:latest
+    container_name: teamsync-settings-service
+    restart: unless-stopped
+    ports:
+      - "9094:9094"
+    environment:
+      SERVER_PORT: 9094
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb is an external service
+    networks:
+      - teamsync-network
+
+  presence-service:
+    build:
+      context: .
+      dockerfile: presence-service/Dockerfile
+    image: teamsync/presence-service:latest
+    container_name: teamsync-presence-service
+    restart: unless-stopped
+    ports:
+      - "9095:9095"
+    environment:
+      SERVER_PORT: 9095
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATA_REDIS_HOST: accessarc-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-redis is an external service
+    networks:
+      - teamsync-network
+
+  # ============================================
+  # Permission Manager Service (TS-17)
+  # Drive-Level RBAC with Redis-cached O(1) permission checks
+  # ============================================
+  permission-manager-service:
+    build:
+      context: .
+      dockerfile: permission-manager-service/Dockerfile
+    image: teamsync/permission-manager-service:latest
+    container_name: teamsync-permission-manager-service
+    restart: unless-stopped
+    ports:
+      - "9096:9096"
+    environment:
+      SERVER_PORT: 9096
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync_permissions?authSource=admin
+      SPRING_DATA_REDIS_HOST: accessarc-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      # Permission cache settings
+      PERMISSION_CACHE_TTL_MINUTES: 5
+      PERMISSION_CACHE_NEGATIVE_TTL_MINUTES: 1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Note: accessarc-mongodb and accessarc-redis are external services
+    networks:
+      - teamsync-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9096/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ============================================
+  # Audit Service (TS-18)
+  # Tamper-proof audit management with ImmuDB
+  # ============================================
+  audit-service:
+    build:
+      context: .
+      dockerfile: audit-service/Dockerfile
+    image: teamsync/audit-service:latest
+    container_name: teamsync-audit-service
+    restart: unless-stopped
+    ports:
+      - "9097:9097"
+    environment:
+      SERVER_PORT: 9097
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATA_MONGODB_URI: mongodb://admin:password@accessarc-mongodb:27017/teamsync?authSource=admin
+      SPRING_DATA_REDIS_HOST: accessarc-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      KAFKA_BOOTSTRAP_SERVERS: teamsync-redpanda:9092
+      ZITADEL_ISSUER: http://teamsync-zitadel:8080
+      # ImmuDB Configuration
+      IMMUDB_HOST: teamsync-immudb
+      IMMUDB_PORT: 3322
+      IMMUDB_DATABASE: teamsync_audit
+      IMMUDB_USERNAME: immudb
+      IMMUDB_PASSWORD: immudb
+      IMMUDB_STATE_FOLDER: /var/lib/teamsync/immudb-state
+    volumes:
+      - teamsync-audit-state:/var/lib/teamsync/immudb-state
+    depends_on:
+      immudb:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - teamsync-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9097/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  teamsync-network:
+    external: true
+    name: teamsync-network
+
+# ============================================
+# Volumes (TeamSync-specific only)
+# MongoDB and Redis volumes are managed by AccessArc
+# ============================================
+volumes:
+  teamsync-minio-data:
+    name: teamsync-minio-data
+  teamsync-redpanda-data:
+    name: teamsync-redpanda-data
+  teamsync-elasticsearch-data:
+    name: teamsync-elasticsearch-data
+  teamsync-immudb-data:
+    name: teamsync-immudb-data
+  teamsync-audit-state:
+    name: teamsync-audit-state

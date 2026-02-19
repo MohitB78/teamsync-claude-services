@@ -1,0 +1,114 @@
+server:
+  port: 9093
+  # SECURITY FIX (Round 8): Prevent stack trace and error message disclosure
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+spring:
+  application:
+    name: teamsync-wopi-service
+
+  # Spring Cloud Config Client
+  config:
+    import: "optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}"
+  cloud:
+    config:
+      enabled: ${CONFIG_ENABLED:true}
+      fail-fast: false
+      retry:
+        initial-interval: 1000
+        max-attempts: 6
+        max-interval: 2000
+        multiplier: 1.1
+    bus:
+      enabled: ${BUS_ENABLED:true}
+      destination: platform.config.bus
+
+  # MongoDB config is in profile-specific files (application-railway.yml)
+  data:
+    mongodb:
+      auto-index-creation: true
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+
+  # Security - OAuth2 Resource Server (Zitadel)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${ZITADEL_ISSUER:http://localhost:8085}
+          jwk-set-uri: ${ZITADEL_ISSUER:http://localhost:8085}/oauth/v2/keys
+
+  # Kafka Configuration (Redpanda on Railway)
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+
+teamsync:
+  wopi:
+    office-online-url: ${OFFICE_ONLINE_URL:https://office.example.com}
+    token-validity-seconds: 3600
+
+# OpenTelemetry Configuration (OTel SDK 1.58.0 - January 2026)
+# See: https://opentelemetry.io/docs/languages/java/configuration/
+otel:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      timeout: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
+  traces:
+    sampler:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+  bsp:
+    schedule:
+      delay: ${OTEL_BSP_SCHEDULE_DELAY:5000}
+    max:
+      queue:
+        size: ${OTEL_BSP_MAX_QUEUE_SIZE:2048}
+      export:
+        batch:
+          size: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:512}
+  environment: ${ENVIRONMENT:development}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:true}
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
+
+logging:
+  level:
+    root: INFO
+    com.teamsync: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+---
+# Docker profile - uses environment variables from docker-compose
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI}
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS}

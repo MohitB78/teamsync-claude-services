@@ -1,0 +1,138 @@
+# Railway integration test profile - uses Railway Redis and Zitadel
+# This profile connects to actual Railway services for integration testing
+server:
+  port: 0  # Random port for tests
+
+spring:
+  application:
+    name: teamsync-api-gateway-railway-test
+
+  # Disable cloud config for tests
+  cloud:
+    config:
+      enabled: false
+    bus:
+      enabled: false
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+
+  # Use Railway Redis for session storage
+  # SECURITY FIX (Round 14 #C13): Removed hardcoded Redis credentials.
+  # Redis URL must be provided via REDIS_URL environment variable.
+  # Tests will fail if REDIS_URL is not set, preventing accidental credential exposure.
+  data:
+    redis:
+      url: ${REDIS_URL:}
+
+  session:
+    store-type: redis
+    timeout: 1h
+    redis:
+      namespace: teamsync:railway-test:session
+
+  # Security - Use Railway Zitadel for JWT validation
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${ZITADEL_ISSUER:https://teamsync-zitadel-production.up.railway.app}
+          jwk-set-uri: ${ZITADEL_ISSUER:https://teamsync-zitadel-production.up.railway.app}/oauth/v2/keys
+
+# Circuit breaker - fast fail for tests
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        slidingWindowSize: 5
+        minimumNumberOfCalls: 2
+        permittedNumberOfCallsInHalfOpenState: 1
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 2s
+        failureRateThreshold: 50
+
+  timelimiter:
+    configs:
+      default:
+        timeoutDuration: 30s  # Longer timeout for Railway network
+
+# Disable actuator endpoints for tests
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+# Logging - more verbose for debugging Railway connections
+logging:
+  level:
+    root: WARN
+    com.teamsync: DEBUG
+    org.springframework.cloud.gateway: INFO
+    org.springframework.security: INFO
+    org.springframework.data.redis: DEBUG
+    io.lettuce: INFO
+
+# Test configuration
+teamsync:
+  gateway:
+    dynamic-routes:
+      enabled: false
+    minio:
+      internal-url: http://localhost:19000
+      host: localhost:19000
+
+  # BFF configuration using Railway Zitadel
+  bff:
+    enabled: true
+    session:
+      cookie-name: TEAMSYNC_SESSION
+      cookie-max-age: 1h
+      cookie-secure: false
+      cookie-same-site: Lax
+      cookie-http-only: true
+      redis-namespace: teamsync:railway-test:session
+    csrf:
+      enabled: false  # Disable CSRF for tests
+      cookie-name: XSRF-TOKEN
+      header-name: X-XSRF-TOKEN
+      exclude-patterns:
+        - /api/**
+        - /wopi/**
+        - /bff/auth/backchannel-logout
+    zitadel:
+      # Railway Zitadel URLs
+      authorization-uri: https://teamsync-zitadel-production.up.railway.app/oauth/v2/authorize
+      token-uri: https://teamsync-zitadel-production.up.railway.app/oauth/v2/token
+      user-info-uri: https://teamsync-zitadel-production.up.railway.app/oidc/v1/userinfo
+      logout-uri: https://teamsync-zitadel-production.up.railway.app/oidc/v1/end_session
+      jwks-uri: https://teamsync-zitadel-production.up.railway.app/oauth/v2/keys
+      client-id: ${ZITADEL_CLIENT_ID:teamsync-bff}
+      connection-timeout-seconds: 10
+      read-timeout-seconds: 30
+    pkce:
+      enabled: true
+      redirect-uri: http://localhost:9080/bff/auth/callback
+      post-logout-redirect-uri: http://localhost:3000/auth/login
+      frontend-login-url: http://localhost:3000
+      frontend-logout-url: http://localhost:3000/auth/login
+      scope: openid email profile
+
+  # Test service URLs (pointing to mock servers - content service still mocked)
+  services:
+    content-service: http://localhost:19081
+    storage-service: http://localhost:19083
+    sharing-service: http://localhost:19084
+    team-service: http://localhost:19085
+    project-service: http://localhost:19086
+    workflow-execution-service: http://localhost:19087
+    trash-service: http://localhost:19088
+    search-service: http://localhost:19089
+    chat-service: http://localhost:19090
+    notification-service: http://localhost:19091
+    activity-service: http://localhost:19092
+    wopi-service: http://localhost:19093
+    settings-service: http://localhost:19094
+    presence-service: http://localhost:19095
+    permission-manager-service: http://localhost:19096

@@ -1,0 +1,49 @@
+# =============================================================================
+# Railway Profile Configuration for TeamSync Team Service
+# =============================================================================
+# MongoDB credentials come from SPRING_MONGODB_URI environment variable
+# IMPORTANT: Spring Boot 4 renamed spring.data.mongodb.uri to spring.mongodb.uri
+# Config Server provides additional shared configuration
+# =============================================================================
+
+server:
+  port: ${PORT:9085}
+
+spring:
+  application:
+    name: teamsync-team-service
+
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+
+  cloud:
+    config:
+      enabled: true
+      fail-fast: false
+      uri: ${CONFIG_SERVER_URI:http://config-server.railway.internal:8888}
+      username: ${CONFIG_SERVER_USER:config}
+      password: ${CONFIG_SERVER_PASSWORD:}
+      retry:
+        initial-interval: 1000
+        max-attempts: 3
+        max-interval: 5000
+        multiplier: 1.5
+    bus:
+      enabled: false
+
+  # MongoDB - Spring Boot 4 uses spring.mongodb.uri (not spring.data.mongodb.uri)
+  # Environment variable: SPRING_MONGODB_URI
+  mongodb:
+    uri: ${SPRING_MONGODB_URI:mongodb://localhost:27017/teamsync}
+
+  data:
+    mongodb:
+      # IMPORTANT: Disable auto-index creation in production to avoid conflicts
+      # with existing indexes that may have different names
+      auto-index-creation: false
+
+  # Kafka configuration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:redpanda.railway.internal:9092}
+    consumer:
+      group-id: team-service

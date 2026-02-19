@@ -1,0 +1,6 @@
+# Railway configuration for TeamSync Backend
+# Deploy from root directory with service-specific Dockerfile
+
+[build]
+builder = "DOCKERFILE"
+# Dockerfile path will be set per-service via environment variable or Railway dashboard
