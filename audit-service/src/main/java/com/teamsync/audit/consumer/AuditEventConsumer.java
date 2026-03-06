@@ -1,27 +1,27 @@
 package com.teamsync.audit.consumer;
 
 import com.teamsync.audit.config.AuditServiceProperties;
+import com.teamsync.audit.constants.AuditConstants;
+import com.teamsync.audit.dto.AuditEvent;
 import com.teamsync.audit.exception.TamperDetectedException;
 import com.teamsync.audit.model.AuditLog;
 import com.teamsync.audit.model.ImmutableAuditRecord;
 import com.teamsync.audit.repository.AuditLogRepository;
 import com.teamsync.audit.service.ImmutableAuditService;
-import com.teamsync.common.event.AuditEvent;
 import io.micrometer.core.annotation.Counted;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
 import org.springframework.validation.annotation.Validated;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
+import java.util.Map;
 
 /**
  * Kafka consumer for audit events.
@@ -32,55 +32,39 @@ import java.util.Set;
  * Flow:
  * 1. Receive event from teamsync.audit.events topic
  * 2. Check if event is high-value (based on action or outcome)
- * 3. Deduplicate using Redis
- * 4. Write to ImmuDB (primary, verified)
- * 5. Sync to MongoDB (secondary, for fast queries)
- * 6. Acknowledge message
+ * 3. Write to ImmuDB (primary, verified)
+ * 4. Sync to MongoDB (secondary, for fast queries)
+ * 5. Acknowledge message
  */
 @Component
 @Slf4j
 @Validated
+@RequiredArgsConstructor
 @ConditionalOnProperty(name = "spring.kafka.bootstrap-servers")
 public class AuditEventConsumer {
 
     private final Optional<ImmutableAuditService> immutableAuditService;
     private final AuditLogRepository auditLogRepository;
-    private final StringRedisTemplate redisTemplate;
     private final AuditServiceProperties properties;
 
-    @Autowired
-    public AuditEventConsumer(
-            @Autowired(required = false) ImmutableAuditService immutableAuditService,
-            AuditLogRepository auditLogRepository,
-            StringRedisTemplate redisTemplate,
-            AuditServiceProperties properties) {
-        this.immutableAuditService = Optional.ofNullable(immutableAuditService);
-        this.auditLogRepository = auditLogRepository;
-        this.redisTemplate = redisTemplate;
-        this.properties = properties;
-
-        if (this.immutableAuditService.isEmpty()) {
-            log.warn("ImmuDB service not available - audit events will only be stored in MongoDB");
-        }
-    }
 
     /**
      * High-value actions that are always stored in ImmuDB.
      */
     private static final Set<String> HIGH_VALUE_ACTIONS = Set.of(
-            AuditEvent.ACTION_DELETE,
-            AuditEvent.ACTION_PERMISSION_CHANGE,
-            AuditEvent.ACTION_SHARE
+            AuditConstants.ACTION_DELETE,
+            AuditConstants.ACTION_PERMISSION_CHANGE,
+            AuditConstants.ACTION_SHARE
     );
 
     @KafkaListener(
-            topics = "teamsync.audit.events",
-            groupId = "audit-service",
+            topics = "audit-events",
+            groupId = "audit-service-group",
             containerFactory = "auditKafkaListenerContainerFactory"
     )
     @Counted(value = "audit.events.received", description = "Number of audit events received from Kafka")
     public void handleAuditEvent(@Payload AuditEvent event, Acknowledgment ack) {
-        if (event == null || event.getEventId() == null) {
+        if (event == null) {
             log.warn("Received null or invalid audit event");
             ack.acknowledge();
             return;
@@ -93,13 +77,6 @@ public class AuditEventConsumer {
             // Check if this is a high-value event
             if (!isHighValueEvent(event)) {
                 log.trace("Skipping non-high-value event: {}", event.getEventId());
-                ack.acknowledge();
-                return;
-            }
-
-            // Deduplication check
-            if (isDuplicateEvent(event.getEventId())) {
-                log.debug("Duplicate audit event skipped: {}", event.getEventId());
                 ack.acknowledge();
                 return;
             }
@@ -156,13 +133,13 @@ public class AuditEventConsumer {
             return true;
         }
 
-        // Include failures if configured
-        if (hvProps.isIncludeFailures() && AuditEvent.OUTCOME_FAILURE.equals(event.getOutcome())) {
+        // Include failures if configured (result field in AuditEvent maps to outcome)
+        if (hvProps.isIncludeFailures() && AuditConstants.RESULT_FAILURE.equalsIgnoreCase(event.getResult())) {
             return true;
         }
 
-        // Include denied if configured
-        if (hvProps.isIncludeDenied() && AuditEvent.OUTCOME_DENIED.equals(event.getOutcome())) {
+        // Include denied if configured (result field in AuditEvent maps to outcome)
+        if (hvProps.isIncludeDenied() && AuditConstants.RESULT_DENIED.equalsIgnoreCase(event.getResult())) {
             return true;
         }
 
@@ -175,24 +152,8 @@ public class AuditEventConsumer {
     }
 
     /**
-     * Check if event was already processed (deduplication).
-     */
-    private boolean isDuplicateEvent(String eventId) {
-        if (!properties.getDeduplication().isEnabled()) {
-            return false;
-        }
-
-        String key = properties.getDeduplication().getRedisPrefix() + eventId;
-        Duration ttl = Duration.ofHours(properties.getDeduplication().getTtlHours());
-
-        // setIfAbsent returns true if key was set (not duplicate)
-        // returns false if key already exists (duplicate)
-        Boolean wasSet = redisTemplate.opsForValue().setIfAbsent(key, "1", ttl);
-        return Boolean.FALSE.equals(wasSet);
-    }
-
-    /**
      * Sync audit event to MongoDB for fast queries.
+     * Extracts nested data from details and context maps.
      */
     private void syncToMongoDB(AuditEvent event, ImmutableAuditRecord record) {
         if (!properties.getMongodbSync().isEnabled()) {
@@ -200,31 +161,68 @@ public class AuditEventConsumer {
         }
 
         try {
+            // Extract details map data
+            Map<String, Object> details = event.getDetails() != null ? event.getDetails() : Map.of();
+            Map<String, Object> before = details.get("before") instanceof Map ?
+                    (Map<String, Object>) details.get("before") : null;
+            Map<String, Object> after = details.get("after") instanceof Map ?
+                    (Map<String, Object>) details.get("after") : null;
+            String resourceName = details.get("resourceName") != null ?
+                    details.get("resourceName").toString() : null;
+            String failureReason = details.get("failureReason") != null ?
+                    details.get("failureReason").toString() : null;
+
+            // Extract context map data
+            Map<String, Object> context = event.getContext() != null ? event.getContext() : Map.of();
+            String ipAddress = context.get("ipAddress") != null ?
+                    context.get("ipAddress").toString() : null;
+            String userAgent = context.get("userAgent") != null ?
+                    context.get("userAgent").toString() : null;
+            String sessionId = context.get("sessionId") != null ?
+                    context.get("sessionId").toString() : null;
+            String requestId = context.get("requestId") != null ?
+                    context.get("requestId").toString() : null;
+            String driveId = context.get("driveId") != null ?
+                    context.get("driveId").toString() : null;
+
+            // Extract PII/compliance flags
+            boolean piiAccessed = context.get("piiAccessed") instanceof Boolean ?
+                    (Boolean) context.get("piiAccessed") : false;
+            boolean sensitiveDataAccessed = context.get("sensitiveDataAccessed") instanceof Boolean ?
+                    (Boolean) context.get("sensitiveDataAccessed") : false;
+            String dataClassification = context.get("dataClassification") != null ?
+                    context.get("dataClassification").toString() : null;
+
             AuditLog auditLog = AuditLog.builder()
                     .id(event.getEventId())
+                    .eventId(event.getEventId())  // Alias for backward compatibility
                     .tenantId(event.getTenantId())
-                    .driveId(event.getDriveId())
+                    .driveId(driveId)
                     .userId(event.getUserId())
                     .userName(event.getUserName())
                     .action(event.getAction())
                     .resourceType(event.getResourceType())
                     .resourceId(event.getResourceId())
-                    .resourceName(event.getResourceName())
-                    .before(event.getBefore())
-                    .after(event.getAfter())
-                    .ipAddress(event.getIpAddress())
-                    .userAgent(event.getUserAgent())
-                    .sessionId(event.getSessionId())
-                    .requestId(event.getRequestId())
-                    .outcome(event.getOutcome())
-                    .failureReason(event.getFailureReason())
-                    .piiAccessed(event.isPiiAccessed())
-                    .sensitiveDataAccessed(event.isSensitiveDataAccessed())
-                    .dataClassification(event.getDataClassification())
-                    .eventTime(event.getTimestamp())
+                    .resourceName(resourceName)
+                    .before(before)
+                    .after(after)
+                    .ipAddress(ipAddress)
+                    .userAgent(userAgent)
+                    .sessionId(sessionId)
+                    .requestId(requestId)
+                    .outcome(event.getResult())  // result -> outcome mapping
+                    .failureReason(failureReason)
+                    .piiAccessed(piiAccessed)
+                    .sensitiveDataAccessed(sensitiveDataAccessed)
+                    .dataClassification(dataClassification)
+                    .eventTime(event.getEventTime())
+                    .timestamp(event.getEventTime())  // Alias for backward compatibility
+                    .metadata(details)  // Store full details as metadata
                     .immudbTransactionId(record.getImmudbTransactionId())
-                    .hashChain(record.getHashChain())
+                    .immudbHashChain(record.getHashChain())
+                    .hashChain(record.getHashChain())  // Keep for backward compatibility
                     .immudbVerified(record.isVerified())
+                    .verified(record.isVerified())  // Keep for backward compatibility
                     .verifiedAt(record.getVerifiedAt())
                     .build();
 

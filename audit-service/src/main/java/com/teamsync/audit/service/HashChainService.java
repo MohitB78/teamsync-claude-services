@@ -1,9 +1,9 @@
 package com.teamsync.audit.service;
 
 import com.teamsync.audit.config.AuditServiceProperties;
+import com.teamsync.audit.dto.AuditEvent;
 import com.teamsync.audit.model.AuditLog;
 import com.teamsync.audit.repository.AuditLogRepository;
-import com.teamsync.common.event.AuditEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -163,9 +163,7 @@ public class HashChainService {
             nullSafe(event.getUserId()),
             nullSafe(event.getAction()),
             nullSafe(event.getResourceType()),
-            nullSafe(event.getResourceId()),
-            nullSafe(event.getOutcome()),
-            event.getTimestamp() != null ? event.getTimestamp().toString() : ""
+            nullSafe(event.getResourceId())
         );
     }
 

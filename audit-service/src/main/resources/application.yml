@@ -28,27 +28,15 @@ spring:
       destination: platform.config.bus
 
   # MongoDB config for audit log mirror (fast queries)
-  data:
-    mongodb:
-      auto-index-creation: true
-    redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+  mongodb:
+    uri: ${SPRING_DATA_MONGODB_URI}
+    auto-index-creation: true
 
-  # Security - OAuth2 Resource Server (Zitadel)
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          issuer-uri: ${ZITADEL_ISSUER:http://localhost:8085}
-          jwk-set-uri: ${ZITADEL_ISSUER:http://localhost:8085}/oauth/v2/keys
-
-  # Kafka Configuration (Redpanda on Railway)
   kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
     consumer:
-      group-id: audit-service
-      auto-offset-reset: earliest
+      group-id: audit-service-group
+      auto-offset-reset: latest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
@@ -57,54 +45,36 @@ spring:
         isolation.level: read_committed
 
 # ImmuDB Configuration
-teamsync:
-  audit:
-    immudb:
-      host: ${IMMUDB_HOST:localhost}
-      port: ${IMMUDB_PORT:3322}
-      database: ${IMMUDB_DATABASE:teamsync_audit}
-      username: ${IMMUDB_USERNAME:immudb}
-      password: ${IMMUDB_PASSWORD:immudb}
-      state-folder: ${IMMUDB_STATE_FOLDER:/var/lib/teamsync/immudb-state}
-      tls:
-        enabled: ${IMMUDB_TLS_ENABLED:false}
-    mongodb-sync:
-      enabled: true
-      collection: audit_logs
-    verification:
-      hash-chain-enabled: true
-    retention:
-      enabled: true
-      default-period: 365d
-      truncation-frequency: 24h
-      min-retention-period: 30d
-      max-retention-period: 2555d
-    # High-value event filtering
-    high-value-events:
-      actions:
-        - DELETE
-        - PERMISSION_CHANGE
-        - SHARE
-      include-failures: true
-      include-denied: true
-    # Deduplication settings
-    deduplication:
-      enabled: true
-      ttl-hours: 24
-      redis-prefix: "teamsync:audit:dedup:"
 
-# OpenTelemetry Configuration
-otel:
-  tracing:
-    enabled: ${OTEL_TRACING_ENABLED:true}
-  exporter:
-    otlp:
-      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
-      timeout: ${OTEL_EXPORTER_OTLP_TIMEOUT:10000}
-  traces:
-    sampler:
-      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
-  environment: ${ENVIRONMENT:development}
+audit:
+  immudb:
+    host: ${IMMUDB_HOST}
+    port: ${IMMUDB_PORT}
+    database: ${IMMUDB_DATABASE}
+    username: ${IMMUDB_USERNAME}
+    password: ${IMMUDB_PASSWORD}
+    state-folder: ${IMMUDB_STATE_FOLDER}
+    tls:
+      enabled: ${IMMUDB_TLS_ENABLED}
+  mongodb-sync:
+    enabled: true
+    collection: auditdb
+  verification:
+    hash-chain-enabled: true
+  retention:
+    enabled: true
+    default-period: 365d
+    truncation-frequency: 24h
+    min-retention-period: 30d
+    max-retention-period: 2555d
+  # High-value event filtering
+  high-value-events:
+    actions:
+      - DELETE
+      - PERMISSION_CHANGE
+      - SHARE
+    include-failures: true
+    include-denied: true
 
 management:
   endpoints:
@@ -118,10 +88,6 @@ management:
     tags:
       application: ${spring.application.name}
       environment: ${ENVIRONMENT:development}
-  tracing:
-    enabled: ${OTEL_TRACING_ENABLED:true}
-    sampling:
-      probability: ${OTEL_TRACES_SAMPLER_PROBABILITY:1.0}
 
 logging:
   level:
@@ -137,13 +103,6 @@ spring:
   config:
     activate:
       on-profile: docker
-
-  data:
-    mongodb:
-      uri: ${SPRING_DATA_MONGODB_URI}
-    redis:
-      host: ${SPRING_DATA_REDIS_HOST:accessarc-redis}
-      port: ${SPRING_DATA_REDIS_PORT:6379}
 
   kafka:
     bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS}

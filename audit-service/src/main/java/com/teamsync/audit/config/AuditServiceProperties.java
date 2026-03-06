@@ -4,7 +4,9 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
+import lombok.AccessLevel;
 import lombok.Data;
+import lombok.experimental.FieldDefaults;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
@@ -12,11 +14,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Configuration properties for the Audit Service.
- * Uses Java records for immutable configuration following Spring Boot 4 best practices.
- */
-@ConfigurationProperties(prefix = "teamsync.audit")
+@ConfigurationProperties(prefix = "audit")
 @Validated
 @Data
 public class AuditServiceProperties {
@@ -41,35 +39,16 @@ public class AuditServiceProperties {
     @NotNull
     private HighValueEventsProperties highValueEvents = new HighValueEventsProperties();
 
-    @Valid
-    @NotNull
-    private DeduplicationProperties deduplication = new DeduplicationProperties();
-
-    /**
-     * ImmuDB connection and authentication settings.
-     */
     @Data
+    @FieldDefaults(level = AccessLevel.PRIVATE)
     public static class ImmuDbProperties {
-
-        /**
-         * Whether ImmuDB integration is enabled.
-         * When disabled, audit events are only stored in MongoDB.
-         */
-        private boolean enabled = true;
-
-        private String host = "localhost";
-
-        @Positive
-        private int port = 3322;
-
-        private String database = "teamsync_audit";
-
-        private String username = "immudb";
-
-        private String password = "immudb";
-
-        @NotBlank
-        private String stateFolder = "/var/lib/teamsync/immudb-state";
+         boolean enabled = true;
+         String host;
+         int port;
+         String database;
+         String username;
+         String password;
+         String stateFolder = "/var/lib/teamsync/immudb-state";
 
         @Valid
         @NotNull
@@ -84,13 +63,11 @@ public class AuditServiceProperties {
         }
     }
 
-    /**
-     * MongoDB sync settings for fast query mirror.
-     */
+
     @Data
     public static class MongoDbSyncProperties {
         private boolean enabled = true;
-        private String collection = "audit_logs";
+        private String collection = "auditdb";
     }
 
     /**
@@ -141,15 +118,5 @@ public class AuditServiceProperties {
          * Signature events are always tracked regardless of this setting.
          */
         private Set<String> alwaysTrackResourceTypes = Set.of();
-    }
-
-    /**
-     * Event deduplication settings using Redis.
-     */
-    @Data
-    public static class DeduplicationProperties {
-        private boolean enabled = true;
-        private int ttlHours = 24;
-        private String redisPrefix = "teamsync:audit:dedup:";
     }
 }

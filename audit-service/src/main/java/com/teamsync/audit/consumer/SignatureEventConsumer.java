@@ -1,18 +1,15 @@
 package com.teamsync.audit.consumer;
 
+import com.teamsync.audit.dto.SignatureAuditEvent;
 import com.teamsync.audit.model.AuditLog;
 import com.teamsync.audit.model.ImmutableAuditRecord;
 import com.teamsync.audit.repository.AuditLogRepository;
 import com.teamsync.audit.service.ImmutableAuditService;
-import com.teamsync.common.config.KafkaTopics;
-import com.teamsync.common.event.SignatureAuditEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
@@ -29,21 +26,15 @@ import java.util.Optional;
 @Slf4j
 public class SignatureEventConsumer {
 
-    private static final String DEDUP_KEY_PREFIX = "audit:signature:dedup:";
-    private static final Duration DEDUP_TTL = Duration.ofHours(24);
-
     private final Optional<ImmutableAuditService> immutableAuditService;
     private final AuditLogRepository auditLogRepository;
-    private final RedisTemplate<String, String> redisTemplate;
 
     @Autowired
     public SignatureEventConsumer(
             @Autowired(required = false) ImmutableAuditService immutableAuditService,
-            AuditLogRepository auditLogRepository,
-            RedisTemplate<String, String> redisTemplate) {
+            AuditLogRepository auditLogRepository) {
         this.immutableAuditService = Optional.ofNullable(immutableAuditService);
         this.auditLogRepository = auditLogRepository;
-        this.redisTemplate = redisTemplate;
 
         if (this.immutableAuditService.isEmpty()) {
             log.warn("ImmuDB service not available - signature events will only be stored in MongoDB");
@@ -51,22 +42,13 @@ public class SignatureEventConsumer {
     }
 
     @KafkaListener(
-            topics = KafkaTopics.SIGNATURE_AUDIT_EVENTS,
-            groupId = "${spring.kafka.consumer.group-id}",
+            topics = "signature-events",
+            groupId = "signature-service-group",
             containerFactory = "signatureAuditKafkaListenerContainerFactory"
     )
     public void consumeSignatureEvent(SignatureAuditEvent event) {
-        if (event == null || event.getEventId() == null) {
+        if (event == null ) {
             log.warn("Received null or invalid signature audit event");
-            return;
-        }
-
-        // Deduplication check
-        String dedupKey = DEDUP_KEY_PREFIX + event.getEventId();
-        Boolean isNew = redisTemplate.opsForValue().setIfAbsent(dedupKey, "1", DEDUP_TTL);
-
-        if (Boolean.FALSE.equals(isNew)) {
-            log.debug("Duplicate signature audit event skipped: {}", event.getEventId());
             return;
         }
 
@@ -96,8 +78,6 @@ public class SignatureEventConsumer {
 
         } catch (Exception e) {
             log.error("Failed to process signature audit event: id={}", event.getEventId(), e);
-            // Remove dedup key on failure to allow retry
-            redisTemplate.delete(dedupKey);
             throw e;
         }
     }
@@ -120,7 +100,7 @@ public class SignatureEventConsumer {
                     .userAgent(event.getUserAgent())
                     .sessionId(event.getSessionId())
                     .outcome("SUCCESS")
-                    .timestamp(event.getTimestamp())
+                    .timestamp(Instant.now())
                     .immudbTransactionId(record.getImmudbTransactionId())
                     .immudbHashChain(record.getHashChain())
                     .verified(true)

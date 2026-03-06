@@ -1,12 +1,9 @@
 package com.teamsync.audit.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.teamsync.audit.config.AuditServiceProperties;
+import com.teamsync.audit.dto.AuditEvent;
+import com.teamsync.audit.dto.SignatureAuditEvent;
 import com.teamsync.audit.exception.TamperDetectedException;
 import com.teamsync.audit.model.ImmutableAuditRecord;
-import com.teamsync.common.event.AuditEvent;
-import com.teamsync.common.event.SignatureAuditEvent;
 import io.codenotary.immudb4j.ImmuClient;
 import io.codenotary.immudb4j.exceptions.VerificationException;
 import io.codenotary.immudb4j.sql.SQLQueryResult;
@@ -16,13 +13,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * Service for writing audit events to ImmuDB with cryptographic verification.
- *
  * Uses ImmuDB's verifiedSQLExec() for tamper-proof writes.
  * Each write is cryptographically verified by the ImmuDB client,
  * ensuring the data was stored correctly and can be proven later.
@@ -36,7 +34,6 @@ public class ImmutableAuditService {
     private final ImmuClient immuClient;
     private final HashChainService hashChainService;
     private final ObjectMapper objectMapper;
-    private final AuditServiceProperties properties;
 
     /**
      * Write an audit event to ImmuDB with cryptographic verification.
@@ -53,42 +50,35 @@ public class ImmutableAuditService {
         String previousHash = hashChainService.getLatestHashChain(event.getTenantId());
 
         try {
-            // Build SQL INSERT statement
+            // details and context are already Map<String, Object> in the DTO
+            // Serialize them directly, or use empty maps if null
+            Map<String, Object> detailsMap = event.getDetails() != null ? event.getDetails() : new LinkedHashMap<>();
+            Map<String, Object> contextMap = event.getContext() != null ? event.getContext() : new LinkedHashMap<>();
+
+            // Build SQL INSERT statement matching audit_events table schema
             String sql = """
                 INSERT INTO audit_events (
-                    id, tenant_id, user_id, user_name, action, resource_type,
-                    resource_id, resource_name, drive_id, before_state, after_state,
-                    ip_address, user_agent, session_id, request_id, outcome,
-                    failure_reason, pii_accessed, sensitive_data, classification,
-                    event_time, hash_chain
+                    id, tenant_id, user_id, event_id, user_name, action,
+                    resource_type, resource_id, eventType, result,
+                    details, context, event_time, hash_chain
                 ) VALUES (
                     '%s', '%s', '%s', '%s', '%s', '%s',
-                    '%s', '%s', '%s', '%s', '%s',
-                    '%s', '%s', '%s', '%s', '%s',
-                    '%s', %s, %s, '%s',
-                    NOW(), '%s'
+                    '%s', '%s', '%s', '%s',
+                    '%s', '%s', NOW(), '%s'
                 )
                 """.formatted(
-                    escape(event.getEventId()),
+                    escape(event.getId()),
                     escape(event.getTenantId()),
                     escape(event.getUserId()),
+                    escape(event.getEventId()),
                     escape(event.getUserName()),
                     escape(event.getAction()),
                     escape(event.getResourceType()),
                     escape(event.getResourceId()),
-                    escape(event.getResourceName()),
-                    escape(event.getDriveId()),
-                    escape(serializeJson(event.getBefore())),
-                    escape(serializeJson(event.getAfter())),
-                    escape(event.getIpAddress()),
-                    escape(truncate(event.getUserAgent(), 500)),
-                    escape(event.getSessionId()),
-                    escape(event.getRequestId()),
-                    escape(event.getOutcome()),
-                    escape(event.getFailureReason()),
-                    event.isPiiAccessed(),
-                    event.isSensitiveDataAccessed(),
-                    escape(event.getDataClassification()),
+                    escape(event.getEventType()),
+                    escape(event.getResult()),
+                    escape(serializeJson(detailsMap)),
+                    escape(serializeJson(contextMap)),
                     escape(hashChain)
                 );
 
@@ -102,10 +92,10 @@ public class ImmutableAuditService {
             long txId = System.currentTimeMillis(); // Placeholder - actual impl would get from ImmuDB
 
             log.debug("ImmuDB write successful: eventId={}, hashChain={}",
-                    event.getEventId(), hashChain != null ? hashChain.substring(0, 16) + "..." : "null");
+                    event.getId(), hashChain != null ? hashChain.substring(0, 16) + "..." : "null");
 
             return ImmutableAuditRecord.builder()
-                    .eventId(event.getEventId())
+                    .eventId(event.getId())
                     .immudbTransactionId(txId)
                     .hashChain(hashChain)
                     .previousHashChain(previousHash)
@@ -118,12 +108,12 @@ public class ImmutableAuditService {
             // Check if this is a verification exception (potential tampering)
             if (e instanceof VerificationException) {
                 log.error("TAMPER ALERT: ImmuDB verification failed for event {}: {}",
-                        event.getEventId(), e.getMessage());
+                        event.getId(), e.getMessage());
                 throw new TamperDetectedException(
                         "ImmuDB verification failed - potential tampering detected", e);
             }
             log.error("Failed to write audit event {} to ImmuDB: {}",
-                    event.getEventId(), e.getMessage(), e);
+                    event.getId(), e.getMessage(), e);
             throw new RuntimeException("ImmuDB write failed", e);
         }
     }
@@ -135,7 +125,7 @@ public class ImmutableAuditService {
     @Counted(value = "audit.immudb.signature.write.count", description = "Number of signature events written")
     public ImmutableAuditRecord writeSignatureAuditEvent(SignatureAuditEvent event) {
         return writeSignatureEvent(
-                event.getEventId(),
+                event.getId(),
                 event.getTenantId(),
                 event.getRequestId(),
                 event.getDocumentId(),
@@ -149,7 +139,7 @@ public class ImmutableAuditService {
                 event.getIpAddress(),
                 event.getUserAgent(),
                 event.getSessionId(),
-                event.getTimestamp()
+                event.getEventTime()
         );
     }
 
@@ -159,11 +149,11 @@ public class ImmutableAuditService {
     public ImmutableAuditRecord writeSignatureEvent(
             String id, String tenantId, String requestId, String documentId,
             String actorId, String actorEmail, String actorName, String actorType,
-            String eventType, String description, Map<String, Object> metadata,
-            String ipAddress, String userAgent, String sessionId, Instant timestamp) {
+            String eventType, String description, String metadata,
+            String ipAddress, String userAgent, String sessionId, Instant eventTime) {
 
         String hashChain = hashChainService.computeSignatureHashChain(
-                tenantId, id, requestId, actorEmail, eventType, timestamp);
+                tenantId, id, requestId, actorEmail, eventType, eventTime);
 
         try {
             String sql = """
@@ -187,7 +177,7 @@ public class ImmutableAuditService {
                     escape(actorType),
                     escape(eventType),
                     escape(description),
-                    escape(serializeJson(metadata)),
+                    escape(metadata),
                     escape(ipAddress),
                     escape(truncate(userAgent, 500)),
                     escape(sessionId),
@@ -254,7 +244,7 @@ public class ImmutableAuditService {
             String json = objectMapper.writeValueAsString(obj);
             // Truncate large JSON to fit ImmuDB VARCHAR limits
             return truncate(json, 8000);
-        } catch (JsonProcessingException e) {
+        } catch (Exception e) {
             log.warn("Failed to serialize object to JSON: {}", e.getMessage());
             return "{}";
         }
@@ -265,14 +255,14 @@ public class ImmutableAuditService {
      */
     private String buildEventDataString(AuditEvent event) {
         return String.join("|",
-            event.getEventId() != null ? event.getEventId() : "",
+            event.getId() != null ? event.getId() : "",
             event.getTenantId() != null ? event.getTenantId() : "",
             event.getUserId() != null ? event.getUserId() : "",
             event.getAction() != null ? event.getAction() : "",
             event.getResourceType() != null ? event.getResourceType() : "",
             event.getResourceId() != null ? event.getResourceId() : "",
-            event.getOutcome() != null ? event.getOutcome() : "",
-            event.getTimestamp() != null ? event.getTimestamp().toString() : ""
+            event.getResult() != null ? event.getResult() : "",
+            event.getEventTime() != null ? event.getEventTime().toString() : ""
         );
     }
 }

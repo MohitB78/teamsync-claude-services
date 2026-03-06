@@ -4,8 +4,6 @@ import com.teamsync.audit.dto.*;
 import com.teamsync.audit.model.PurgeRecord;
 import com.teamsync.audit.service.AuditPurgeService;
 import com.teamsync.audit.service.AuditSearchService;
-import com.teamsync.common.dto.ApiResponse;
-import com.teamsync.common.context.TenantContext;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -15,9 +13,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -39,7 +34,6 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 @Validated
 @Slf4j
-@PreAuthorize("isAuthenticated()")
 public class AuditAdminController {
 
     private final AuditSearchService auditSearchService;
@@ -49,11 +43,11 @@ public class AuditAdminController {
     private static final String ID_PATTERN = "^[a-zA-Z0-9-]{1,64}$";
 
     @PostMapping("/search")
-    @PreAuthorize("hasRole('ADMIN') or hasRole('AUDIT_ADMIN')")
     public ResponseEntity<ApiResponse<AuditSearchResponse>> searchAuditLogs(
-            @RequestBody @Valid AuditSearchRequest request) {
+            @RequestBody @Valid AuditSearchRequest request,
+            @RequestHeader("X-TenantId") String tenantId
+            ) {
 
-        String tenantId = TenantContext.getTenantId();
         log.info("Searching audit logs for tenant {}", tenantId);
 
         AuditSearchResponse response = auditSearchService.search(tenantId, request);
@@ -68,10 +62,8 @@ public class AuditAdminController {
      * Get audit statistics for dashboard.
      */
     @GetMapping("/stats")
-    @PreAuthorize("hasRole('ADMIN') or hasRole('AUDIT_ADMIN')")
-    public ResponseEntity<ApiResponse<AuditStats>> getAuditStats() {
+    public ResponseEntity<ApiResponse<AuditStats>> getAuditStats(@RequestHeader("X-TenantId") String tenantId) {
 
-        String tenantId = TenantContext.getTenantId();
         log.info("Getting audit stats for tenant {}", tenantId);
 
         AuditStats stats = auditSearchService.getStats(tenantId);
@@ -86,13 +78,12 @@ public class AuditAdminController {
      * Get audit activity for a specific user.
      */
     @GetMapping("/users/{userId}/activity")
-    @PreAuthorize("hasRole('ADMIN') or hasRole('AUDIT_ADMIN')")
     public ResponseEntity<ApiResponse<AuditSearchResponse>> getUserActivity(
             @PathVariable @NotBlank @Pattern(regexp = ID_PATTERN) String userId,
             @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestHeader("X-TenantId") String tenantId,
             @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
 
-        String tenantId = TenantContext.getTenantId();
         log.info("Getting activity for user {} in tenant {}", userId, tenantId);
 
         AuditSearchResponse response = auditSearchService.getUserActivity(tenantId, userId, page, size);
@@ -111,11 +102,10 @@ public class AuditAdminController {
      * Preview what will be purged (dry run).
      */
     @PostMapping("/purge/preview")
-    @PreAuthorize("hasRole('AUDIT_ADMIN')")
     public ResponseEntity<ApiResponse<PurgeResponse>> previewPurge(
-            @RequestBody @Valid PurgeRequest request) {
+            @RequestBody @Valid PurgeRequest request,
+            @RequestHeader("X-TenantId") String tenantId) {
 
-        String tenantId = TenantContext.getTenantId();
         log.info("Previewing purge for tenant {} with retention {}", tenantId, request.getRetentionPeriod());
 
         PurgeResponse response = auditPurgeService.previewPurge(tenantId, request);
@@ -130,11 +120,14 @@ public class AuditAdminController {
      * Execute purge operation.
      * Requires AUDIT_ADMIN role and valid confirmation code.
      */
+/*
+TODO :
     @PostMapping("/purge/execute")
-    @PreAuthorize("hasRole('AUDIT_ADMIN')")
     public ResponseEntity<ApiResponse<PurgeResponse>> executePurge(
             @RequestBody @Valid PurgeRequest request,
-            @AuthenticationPrincipal Jwt jwt) {
+            @RequestHeader("X-TenantId") String tenantId)
+    //        @AuthenticationPrincipal Jwt jwt
+    ) {
 
         String tenantId = TenantContext.getTenantId();
         String userId = jwt.getSubject();
@@ -151,17 +144,18 @@ public class AuditAdminController {
                 .error(response.getErrorMessage())
                 .build());
     }
+*/
 
     /**
      * Get purge history.
      */
     @GetMapping("/purge/history")
-    @PreAuthorize("hasRole('ADMIN') or hasRole('AUDIT_ADMIN')")
     public ResponseEntity<ApiResponse<PurgeHistoryResponse>> getPurgeHistory(
             @RequestParam(defaultValue = "0") @Min(0) int page,
-            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+            @RequestHeader("X-TenantId") String tenantId
+            ) {
 
-        String tenantId = TenantContext.getTenantId();
         log.info("Getting purge history for tenant {}", tenantId);
 
         Page<PurgeRecord> purgeRecords = auditPurgeService.getPurgeHistory(tenantId, page, size);

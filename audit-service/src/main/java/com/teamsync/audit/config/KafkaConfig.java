@@ -1,7 +1,7 @@
 package com.teamsync.audit.config;
 
-import com.teamsync.common.event.AuditEvent;
-import com.teamsync.common.event.SignatureAuditEvent;
+import com.teamsync.audit.dto.AuditEvent;
+import com.teamsync.audit.dto.SignatureAuditEvent;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,20 +35,24 @@ public class KafkaConfig {
     public ConsumerFactory<String, AuditEvent> auditEventConsumerFactory() {
         Map<String, Object> props = commonConsumerProperties();
 
-        JsonDeserializer<AuditEvent> deserializer = new JsonDeserializer<>(AuditEvent.class);
-        deserializer.setRemoveTypeHeaders(false);
-        deserializer.addTrustedPackages("com.teamsync.common.event");
-        deserializer.setUseTypeMapperForKey(true);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS, StringDeserializer.class);
+        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, AuditEvent.class.getName());
+       // props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.teamsync.common.event,com.teamsync.audit.dto");
+        props.put(JsonDeserializer.REMOVE_TYPE_INFO_HEADERS, false);
 
-        return new DefaultKafkaConsumerFactory<>(
-                props,
-                new ErrorHandlingDeserializer<>(new StringDeserializer()),
-                new ErrorHandlingDeserializer<>(deserializer)
-        );
+        return new DefaultKafkaConsumerFactory<>(props);
     }
 
-    /**
-     * Kafka listener container factory for AuditEvent.
+
+
+    /*
+        it controls number of consumer threads
+        * Concurrency ≤ number of topic partitions.
+        If topic has 2 partitions and concurrency is 3:
+        👉 one thread idle.
      */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, AuditEvent> auditKafkaListenerContainerFactory() {
@@ -66,16 +70,16 @@ public class KafkaConfig {
     public ConsumerFactory<String, SignatureAuditEvent> signatureAuditEventConsumerFactory() {
         Map<String, Object> props = commonConsumerProperties();
 
-        JsonDeserializer<SignatureAuditEvent> deserializer = new JsonDeserializer<>(SignatureAuditEvent.class);
-        deserializer.setRemoveTypeHeaders(false);
-        deserializer.addTrustedPackages("com.teamsync.common.event");
-        deserializer.setUseTypeMapperForKey(true);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS, StringDeserializer.class);
+        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, SignatureAuditEvent.class.getName());
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.teamsync.common.event,com.teamsync.audit.dto");
+        props.put(JsonDeserializer.REMOVE_TYPE_INFO_HEADERS, false);
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, true);
 
-        return new DefaultKafkaConsumerFactory<>(
-                props,
-                new ErrorHandlingDeserializer<>(new StringDeserializer()),
-                new ErrorHandlingDeserializer<>(deserializer)
-        );
+        return new DefaultKafkaConsumerFactory<>(props);
     }
 
     /**
